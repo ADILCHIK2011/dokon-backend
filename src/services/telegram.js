@@ -26,10 +26,25 @@ const KEYBOARD = {
   },
 };
 
+const UPGRADE_MESSAGE =
+  "Bu bot faqat Pro rejadagi do'konlar uchun mavjud. Davom etish uchun Pro rejaga o'ting.";
+
+// Telegram bot is a Pro-plan feature (same gate as telegram.routes.js), but
+// a plan downgrade only takes effect at the HTTP layer via loadMarket() —
+// an already-linked chat has no per-request middleware, so every entry
+// point below (notifyOwners, /start, and the general message handler) has
+// to re-check this itself instead of trusting telegramChatId being set.
+function isMarketPro(market) {
+  return !!market && market.plan === 'pro' && market.active && market.subscriptionExpiresAt >= new Date();
+}
+
 // No-ops silently when the bot isn't configured, so controllers never need
 // to check whether Telegram is enabled on this deployment before calling in.
 async function notifyOwners(marketId, text) {
   if (!bot) return;
+  const market = await Market.findById(marketId).select('plan active subscriptionExpiresAt');
+  if (!isMarketPro(market)) return;
+
   const owners = await User.find({ market: marketId, role: 'owner', telegramChatId: { $exists: true, $ne: null } });
   await Promise.all(
     owners.map((owner) =>
@@ -41,8 +56,17 @@ async function notifyOwners(marketId, text) {
 async function handleStart(msg) {
   const chatId = msg.chat.id;
 
-  const existing = await User.findOne({ telegramChatId: String(chatId) });
+  const existing = await User.findOne({ telegramChatId: String(chatId) }).populate(
+    'market',
+    'name plan active subscriptionExpiresAt'
+  );
   if (existing) {
+    if (!isMarketPro(existing.market)) {
+      existing.telegramChatId = undefined;
+      await existing.save();
+      await bot.sendMessage(chatId, UPGRADE_MESSAGE, { reply_markup: { remove_keyboard: true } });
+      return;
+    }
     await bot.sendMessage(chatId, 'Siz allaqachon ulangansiz.', KEYBOARD);
     return;
   }
@@ -99,6 +123,10 @@ async function handleLoginStep(msg) {
   const market = await Market.findOne({ slug: session.slug });
   if (!market || !market.active || market.subscriptionExpiresAt < new Date()) {
     await bot.sendMessage(chatId, "❌ Do'kon topilmadi yoki obuna muddati tugagan. Qaytadan urinish uchun /start yuboring.");
+    return true;
+  }
+  if (market.plan !== 'pro') {
+    await bot.sendMessage(chatId, UPGRADE_MESSAGE);
     return true;
   }
 
@@ -215,9 +243,15 @@ function registerHandlers() {
       .then((handled) => {
         if (handled) return null;
         return User.findOne({ telegramChatId: String(msg.chat.id) })
-          .populate('market', 'name')
+          .populate('market', 'name plan active subscriptionExpiresAt')
           .then((owner) => {
             if (!owner) return null;
+            if (!isMarketPro(owner.market)) {
+              owner.telegramChatId = undefined;
+              return owner
+                .save()
+                .then(() => bot.sendMessage(msg.chat.id, UPGRADE_MESSAGE, { reply_markup: { remove_keyboard: true } }));
+            }
             const marketId = owner.market._id;
             if (text === '📊 Bugungi hisobot') return handleBriefing(msg.chat.id, marketId);
             if (text === '🔥 Top mahsulotlar') return handleTopProducts(msg.chat.id, marketId);
