@@ -59,10 +59,23 @@ async function create(req, res) {
 }
 
 async function update(req, res) {
-  const { name, price, costPrice, stock, active } = req.body;
+  const { barcode, name, price, costPrice, stock, active } = req.body;
+
+  if (barcode !== undefined) {
+    const existing = await Product.findOne({
+      barcode,
+      market: req.user.market,
+      _id: { $ne: req.params.id },
+    });
+    if (existing) {
+      return res.status(409).json({ message: 'Bu shtrix-kod allaqachon mavjud' });
+    }
+  }
+
   const product = await Product.findOneAndUpdate(
     { _id: req.params.id, market: req.user.market },
     {
+      ...(barcode !== undefined && { barcode }),
       ...(name !== undefined && { name }),
       ...(price !== undefined && { price }),
       ...(costPrice !== undefined && { costPrice }),
