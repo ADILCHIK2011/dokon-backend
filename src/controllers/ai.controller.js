@@ -35,16 +35,18 @@ Qat'iy qoidalar:
 5. Ma'lumot yetarli bo'lmasa yoki savdo umuman bo'lmagan bo'lsa, shuni tabiiy tarzda ayting — to'qib chiqarmang.`;
 }
 
-// Shared tool-calling loop for both the interactive chat and the daily
-// briefing generator — the only difference between the two is the seed
-// messages passed in. Returns the assistant's final text, or null if the
-// model never settled on a plain-text reply within MAX_ITERATIONS.
-async function runToolLoop(groq, chatMessages, marketId) {
+// Shared tool-calling loop for the interactive chat, the daily briefing
+// generator, and the Telegram bot's marketing chat — they differ only in
+// seed messages and (for the bot) a wider/different tool set, so `tools` and
+// `executeToolFn` are overridable instead of hardcoded to aiTools.js's set.
+// Returns the assistant's final text, or null if the model never settled on
+// a plain-text reply within MAX_ITERATIONS.
+async function runToolLoop(groq, chatMessages, marketId, { tools = TOOLS, executeToolFn = executeTool, context } = {}) {
   for (let i = 0; i < MAX_ITERATIONS; i++) {
     const completion = await groq.chat.completions.create({
       model: process.env.GROQ_MODEL || 'openai/gpt-oss-120b',
       messages: chatMessages,
-      tools: TOOLS,
+      tools,
       tool_choice: 'auto',
       temperature: 0.3,
     });
@@ -63,7 +65,7 @@ async function runToolLoop(groq, chatMessages, marketId) {
       } catch {
         args = {};
       }
-      const result = await executeTool(call.function.name, args, marketId);
+      const result = await executeToolFn(call.function.name, args, marketId, context);
       chatMessages.push({
         role: 'tool',
         tool_call_id: call.id,
@@ -115,20 +117,24 @@ async function chat(req, res) {
   }
 }
 
-// One briefing per market per calendar day (UTC, matching aiTools' date
-// convention) — cached in Mongo so repeat page loads never re-spend a Groq
-// call. Router-level requirePlan('pro') already keeps this Pro-only.
-async function briefing(req, res) {
+// Cached in Mongo per market per calendar day (UTC, matching aiTools' date
+// convention) so repeat page loads don't each spend a fresh Groq call — but
+// re-generated once the cached copy is older than BRIEFING_TTL_MS, since a
+// morning briefing's revenue/stock numbers go stale as the day's sales come
+// in. Shared by the /api/ai/briefing route (Pro-only, see ai.routes.js) and
+// the Telegram bot's daily push / "Bugungi hisobot" button.
+const BRIEFING_TTL_MS = 2 * 60 * 60 * 1000;
+
+async function getOrCreateBriefing(marketId) {
   if (!process.env.GROQ_API_KEY) {
-    return res.status(503).json({ message: "AI yordamchi sozlanmagan. Administrator bilan bog'laning." });
+    return { error: "AI yordamchi sozlanmagan. Administrator bilan bog'laning." };
   }
 
-  const marketId = new mongoose.Types.ObjectId(req.user.market);
   const today = new Date().toISOString().slice(0, 10);
 
   const existing = await Briefing.findOne({ market: marketId, date: today });
-  if (existing) {
-    return res.json({ text: existing.text, date: existing.date });
+  if (existing && Date.now() - existing.createdAt.getTime() < BRIEFING_TTL_MS) {
+    return { text: existing.text, date: existing.date };
   }
 
   const market = await Market.findById(marketId).select('name');
@@ -141,15 +147,22 @@ async function briefing(req, res) {
   try {
     const text = await runToolLoop(groq, chatMessages, marketId);
     if (!text) {
-      return res.status(502).json({ message: "Hisobotni tayyorlab bo'lmadi. Birozdan keyin qayta urining." });
+      return { error: "Hisobotni tayyorlab bo'lmadi. Birozdan keyin qayta urining." };
     }
 
     let saved;
     try {
-      saved = await Briefing.create({ market: marketId, date: today, text });
+      if (existing) {
+        existing.text = text;
+        existing.createdAt = new Date();
+        saved = await existing.save();
+      } else {
+        saved = await Briefing.create({ market: marketId, date: today, text });
+      }
     } catch (err) {
-      // Two tabs loading Overview at once can both miss the findOne above;
-      // the loser of the race hits the unique index instead of duplicating.
+      // Two tabs refreshing Overview at once can both miss the findOne
+      // above; the loser of the race hits the unique index instead of
+      // duplicating.
       if (err.code === 11000) {
         saved = await Briefing.findOne({ market: marketId, date: today });
       } else {
@@ -157,11 +170,20 @@ async function briefing(req, res) {
       }
     }
 
-    res.json({ text: saved.text, date: saved.date });
+    return { text: saved.text, date: saved.date };
   } catch (err) {
     console.error('AI briefing error', err);
-    res.status(502).json({ message: "AI xizmati bilan bog'lanishda xatolik yuz berdi." });
+    return { error: "AI xizmati bilan bog'lanishda xatolik yuz berdi." };
   }
 }
 
-module.exports = { chat, briefing };
+async function briefing(req, res) {
+  const marketId = new mongoose.Types.ObjectId(req.user.market);
+  const result = await getOrCreateBriefing(marketId);
+  if (result.error) {
+    return res.status(result.error.startsWith('AI yordamchi') ? 503 : 502).json({ message: result.error });
+  }
+  res.json(result);
+}
+
+module.exports = { chat, briefing, getOrCreateBriefing, runToolLoop };

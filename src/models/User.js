@@ -8,6 +8,7 @@ const userSchema = new mongoose.Schema({
   market: { type: mongoose.Schema.Types.ObjectId, ref: 'Market' }, // null for superadmin
   active: { type: Boolean, default: true },
   createdAt: { type: Date, default: Date.now },
+  telegramChatId: { type: String },
 });
 
 // Usernames only need to be unique within a market (two markets can both

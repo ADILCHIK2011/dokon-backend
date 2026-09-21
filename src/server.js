@@ -3,6 +3,8 @@ const http = require('http');
 const app = require('./app');
 const connectDB = require('./config/db');
 const { initSocket } = require('./socket');
+const { initBot } = require('./services/telegram');
+const { scheduleDailyMarketNotes } = require('./services/dailyMarketNotes');
 
 const WEAK_SECRETS = new Set(['change-this-dev-secret', 'secret', '']);
 if (!process.env.JWT_SECRET || WEAK_SECRETS.has(process.env.JWT_SECRET)) {
@@ -19,6 +21,8 @@ initSocket(server);
 
 connectDB()
   .then(() => {
+    initBot();
+    scheduleDailyMarketNotes();
     server.listen(PORT, () => {
       console.log(`Server listening on port ${PORT}`);
     });

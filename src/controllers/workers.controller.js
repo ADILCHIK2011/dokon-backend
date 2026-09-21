@@ -1,6 +1,7 @@
 const bcrypt = require('bcryptjs');
 const User = require('../models/User');
 const Market = require('../models/Market');
+const { notifyOwners } = require('../services/telegram');
 
 const STARTER_WORKER_LIMIT = 3;
 
@@ -43,6 +44,11 @@ async function create(req, res) {
   });
 
   const { passwordHash: _omit, ...safeWorker } = worker.toObject();
+
+  notifyOwners(req.user.market, `👤 Yangi xodim qo'shildi: ${name} (${username})`).catch((err) =>
+    console.error('Telegram notify error', err)
+  );
+
   res.status(201).json({ worker: safeWorker });
 }
 

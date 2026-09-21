@@ -3,6 +3,7 @@ const Sale = require('../models/Sale');
 const Product = require('../models/Product');
 const { emitToMarket } = require('../socket');
 const { paginationParams } = require('../utils/pagination');
+const { notifyOwners } = require('../services/telegram');
 
 const PAYMENT_METHODS = ['cash', 'card', 'online'];
 
@@ -172,6 +173,15 @@ async function complete(req, res) {
   sale.paymentMethod = paymentMethod;
   if (!(await saveWithConflictHandling(res, sale))) return;
   emitToMarket(req.user.market, 'stock:changed', stockDiffs);
+
+  const outOfStock = stockDiffs.filter((d) => d.stock === 0);
+  if (outOfStock.length > 0) {
+    const names = outOfStock.map((d) => `"${d.name}"`).join(', ');
+    notifyOwners(req.user.market, `🚨 Omborda tugadi: ${names}`).catch((err) =>
+      console.error('Telegram notify error', err)
+    );
+  }
+
   res.json({ sale });
 }
 

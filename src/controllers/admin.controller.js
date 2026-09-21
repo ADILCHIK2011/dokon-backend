@@ -3,6 +3,7 @@ const Market = require('../models/Market');
 const User = require('../models/User');
 const Product = require('../models/Product');
 const Sale = require('../models/Sale');
+const MarketNote = require('../models/MarketNote');
 const { paginationParams } = require('../utils/pagination');
 const { setMarketStatus } = require('../services/marketCache');
 
@@ -118,4 +119,13 @@ async function update(req, res) {
   res.json({ market });
 }
 
-module.exports = { list, detail, create, renew, update };
+async function notes(req, res) {
+  const { page, limit, skip } = paginationParams(req.query, { defaultLimit: 20, maxLimit: 100 });
+  const [notes, total] = await Promise.all([
+    MarketNote.find({ market: req.params.id }).sort({ createdAt: -1 }).skip(skip).limit(limit),
+    MarketNote.countDocuments({ market: req.params.id }),
+  ]);
+  res.json({ notes, total, page, limit });
+}
+
+module.exports = { list, detail, create, renew, update, notes };

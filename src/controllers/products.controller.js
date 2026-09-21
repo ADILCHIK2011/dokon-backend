@@ -2,6 +2,9 @@ const Product = require('../models/Product');
 const { emitToMarket } = require('../socket');
 const { paginationParams } = require('../utils/pagination');
 const { escapeRegex } = require('../utils/escapeRegex');
+const { notifyOwners } = require('../services/telegram');
+const { formatMoney } = require('../utils/formatMoney');
+const { randomEan13 } = require('../utils/ean13');
 
 async function list(req, res) {
   const filter = { market: req.user.market, active: true };
@@ -30,6 +33,17 @@ async function getByBarcode(req, res) {
     return res.status(404).json({ message: 'Mahsulot topilmadi' });
   }
   res.json({ product });
+}
+
+async function generateBarcode(req, res) {
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const barcode = randomEan13();
+    const exists = await Product.findOne({ barcode, market: req.user.market });
+    if (!exists) {
+      return res.json({ barcode });
+    }
+  }
+  res.status(500).json({ message: "Noyob shtrix-kod yaratib bo'lmadi. Qayta urinib ko'ring." });
 }
 
 async function create(req, res) {
@@ -72,6 +86,11 @@ async function update(req, res) {
     }
   }
 
+  const before = await Product.findOne({ _id: req.params.id, market: req.user.market });
+  if (!before) {
+    return res.status(404).json({ message: 'Mahsulot topilmadi' });
+  }
+
   const product = await Product.findOneAndUpdate(
     { _id: req.params.id, market: req.user.market },
     {
@@ -84,9 +103,21 @@ async function update(req, res) {
     },
     { new: true, runValidators: true }
   );
-  if (!product) {
-    return res.status(404).json({ message: 'Mahsulot topilmadi' });
+
+  // Manual edit from the Products page — always the owner, since this route
+  // is requireRole('owner')-only, but the owner still wants to see it happen.
+  if (price !== undefined && price !== before.price) {
+    notifyOwners(
+      req.user.market,
+      `✏️ "${product.name}": narx ${formatMoney(before.price)} → ${formatMoney(price)}`
+    ).catch((err) => console.error('Telegram notify error', err));
   }
+  if (stock !== undefined && stock !== before.stock) {
+    notifyOwners(req.user.market, `✏️ "${product.name}": qoldiq ${before.stock} → ${stock} dona`).catch((err) =>
+      console.error('Telegram notify error', err)
+    );
+  }
+
   emitToMarket(req.user.market, 'stock:changed', [
     { productId: product._id, stock: product.stock, name: product.name, barcode: product.barcode },
   ]);
@@ -149,4 +180,4 @@ async function bulkImport(req, res) {
   });
 }
 
-module.exports = { list, getByBarcode, create, update, remove, bulkImport };
+module.exports = { list, getByBarcode, generateBarcode, create, update, remove, bulkImport };
