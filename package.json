@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "nodemon src/server.js",
     "start": "node src/server.js",
-    "seed:admin": "node src/scripts/seedSuperAdmin.js"
+    "seed:admin": "node src/scripts/seedSuperAdmin.js",
+    "migrate:product-units": "node src/scripts/migrateProductUnits.js"
   },
   "keywords": [],
   "author": "",

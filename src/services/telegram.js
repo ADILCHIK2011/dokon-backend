@@ -167,6 +167,7 @@ async function handleTopProducts(chatId, marketId) {
       $group: {
         _id: '$items.product',
         name: { $first: '$items.name' },
+        unit: { $first: '$items.unit' },
         quantity: { $sum: '$items.quantity' },
         revenue: { $sum: '$items.lineTotal' },
       },
@@ -179,7 +180,9 @@ async function handleTopProducts(chatId, marketId) {
     await bot.sendMessage(chatId, "Bugun hali savdo bo'lmagan.", KEYBOARD);
     return;
   }
-  const lines = rows.map((r, i) => `${i + 1}. ${r.name} — ${r.quantity} dona, ${formatMoney(r.revenue)}`);
+  const lines = rows.map(
+    (r, i) => `${i + 1}. ${r.name} — ${r.quantity} ${r.unit === 'kg' ? 'kg' : 'dona'}, ${formatMoney(r.revenue)}`
+  );
   await bot.sendMessage(chatId, `🔥 Bugungi top mahsulotlar:\n\n${lines.join('\n')}`, KEYBOARD);
 }
 
@@ -192,7 +195,7 @@ async function handleLowStock(chatId, marketId) {
     await bot.sendMessage(chatId, "Kam qolgan mahsulot yo'q. 👍", KEYBOARD);
     return;
   }
-  const lines = products.map((p) => `• ${p.name} — ${p.stock} dona`);
+  const lines = products.map((p) => `• ${p.name} — ${p.stock} ${p.unit === 'kg' ? 'kg' : 'dona'}`);
   await bot.sendMessage(chatId, `📦 Kam qolgan mahsulotlar:\n\n${lines.join('\n')}`, KEYBOARD);
 }
 

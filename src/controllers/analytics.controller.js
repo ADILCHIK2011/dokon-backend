@@ -48,6 +48,7 @@ async function topProducts(req, res) {
         _id: '$items.product',
         name: { $first: '$items.name' },
         barcode: { $first: '$items.barcode' },
+        unit: { $first: '$items.unit' },
         quantity: { $sum: '$items.quantity' },
         revenue: { $sum: '$items.lineTotal' },
       },
@@ -96,6 +97,7 @@ async function deadStock(req, res) {
       name: p.name,
       barcode: p.barcode,
       stock: p.stock,
+      unit: p.unit,
       price: p.price,
       lastSoldAt: lastSoldMap.get(p._id.toString()) || null,
     }))

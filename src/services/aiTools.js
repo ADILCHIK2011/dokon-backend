@@ -119,6 +119,7 @@ async function executeTool(name, args, marketId) {
           $group: {
             _id: '$items.product',
             name: { $first: '$items.name' },
+            unit: { $first: '$items.unit' },
             quantity: { $sum: '$items.quantity' },
             revenue: { $sum: '$items.lineTotal' },
           },
@@ -126,7 +127,9 @@ async function executeTool(name, args, marketId) {
         { $sort: { revenue: -1 } },
         { $limit: limit },
       ]);
-      return { products: rows.map((r) => ({ name: r.name, quantity: r.quantity, revenue: r.revenue })) };
+      return {
+        products: rows.map((r) => ({ name: r.name, quantity: r.quantity, unit: r.unit || 'dona', revenue: r.revenue })),
+      };
     }
 
     case 'search_products': {
@@ -135,7 +138,15 @@ async function executeTool(name, args, marketId) {
       if (args.maxStock !== undefined && args.maxStock !== null) filter.stock = { $lte: Number(args.maxStock) };
       const limit = Math.min(Number(args.limit) || 20, 50);
       const products = await Product.find(filter).sort({ stock: 1 }).limit(limit);
-      return { products: products.map((p) => ({ name: p.name, barcode: p.barcode, price: p.price, stock: p.stock })) };
+      return {
+        products: products.map((p) => ({
+          name: p.name,
+          barcode: p.barcode,
+          price: p.price,
+          stock: p.stock,
+          unit: p.unit,
+        })),
+      };
     }
 
     case 'get_dead_stock': {
@@ -150,7 +161,12 @@ async function executeTool(name, args, marketId) {
       const lastSoldMap = new Map(lastSold.map((r) => [r._id.toString(), r.lastSoldAt]));
       const products = await Product.find({ market: marketId, active: true, stock: { $gt: 0 } });
       const rows = products
-        .map((p) => ({ name: p.name, stock: p.stock, lastSoldAt: lastSoldMap.get(p._id.toString()) || null }))
+        .map((p) => ({
+          name: p.name,
+          stock: p.stock,
+          unit: p.unit,
+          lastSoldAt: lastSoldMap.get(p._id.toString()) || null,
+        }))
         .filter((p) => !p.lastSoldAt || p.lastSoldAt < cutoff)
         .slice(0, 30);
       return { products: rows };

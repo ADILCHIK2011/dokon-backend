@@ -7,6 +7,10 @@ const productSchema = new mongoose.Schema({
   price: { type: Number, required: true },
   costPrice: { type: Number },
   stock: { type: Number, required: true, default: 0 },
+  // 'dona' = sold/counted as whole pieces (integer quantities only). 'kg' =
+  // sold by weight — price is per-kilogram, stock and sale quantities can be
+  // fractional (e.g. 0.758 kg).
+  unit: { type: String, enum: ['dona', 'kg'], default: 'dona' },
   active: { type: Boolean, default: true },
 }, { timestamps: true });
 

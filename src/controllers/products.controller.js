@@ -47,7 +47,7 @@ async function generateBarcode(req, res) {
 }
 
 async function create(req, res) {
-  const { barcode, name, price, costPrice, stock } = req.body;
+  const { barcode, name, price, costPrice, stock, unit } = req.body;
   if (!barcode || !name || price === undefined) {
     return res.status(400).json({ message: 'Shtrix-kod, nomi va narxi kerak' });
   }
@@ -64,6 +64,7 @@ async function create(req, res) {
     price,
     costPrice,
     stock: stock || 0,
+    unit: unit === 'kg' ? 'kg' : 'dona',
     active: true,
   });
   emitToMarket(req.user.market, 'stock:changed', [
@@ -73,7 +74,7 @@ async function create(req, res) {
 }
 
 async function update(req, res) {
-  const { barcode, name, price, costPrice, stock, active } = req.body;
+  const { barcode, name, price, costPrice, stock, active, unit } = req.body;
 
   if (barcode !== undefined) {
     const existing = await Product.findOne({
@@ -99,6 +100,7 @@ async function update(req, res) {
       ...(price !== undefined && { price }),
       ...(costPrice !== undefined && { costPrice }),
       ...(stock !== undefined && { stock }),
+      ...(unit !== undefined && { unit: unit === 'kg' ? 'kg' : 'dona' }),
       ...(active !== undefined && { active }),
     },
     { new: true, runValidators: true }
@@ -113,8 +115,9 @@ async function update(req, res) {
     ).catch((err) => console.error('Telegram notify error', err));
   }
   if (stock !== undefined && stock !== before.stock) {
-    notifyOwners(req.user.market, `✏️ "${product.name}": qoldiq ${before.stock} → ${stock} dona`).catch((err) =>
-      console.error('Telegram notify error', err)
+    const unitLabel = product.unit === 'kg' ? 'kg' : 'dona';
+    notifyOwners(req.user.market, `✏️ "${product.name}": qoldiq ${before.stock} → ${stock} ${unitLabel}`).catch(
+      (err) => console.error('Telegram notify error', err)
     );
   }
 
@@ -151,16 +154,27 @@ async function bulkImport(req, res) {
     const name = String(item.name || '').trim();
     const price = Number(item.price);
     const stock = item.stock !== undefined && item.stock !== '' ? Number(item.stock) : 0;
+    // Blank/omitted 'unit' column must NOT overwrite an existing product's
+    // unit on re-import — leave it untouched via $setOnInsert instead, so
+    // only brand-new rows get the 'dona' default.
+    const rawUnit = String(item.unit || '').trim().toLowerCase();
+    const unit = rawUnit ? (['kg', 'kilo', 'kilogramm'].includes(rawUnit) ? 'kg' : 'dona') : null;
 
     if (!barcode || !name || Number.isNaN(price)) {
       errors.push({ row: index + 1, message: 'Shtrix-kod, nomi va toʻgʻri narx kerak' });
       return;
     }
 
+    const set = { barcode, name, price, stock, market: req.user.market, active: true };
+    if (unit) set.unit = unit;
+
+    const update = { $set: set };
+    if (!unit) update.$setOnInsert = { unit: 'dona' };
+
     ops.push({
       updateOne: {
         filter: { barcode, market: req.user.market },
-        update: { $set: { barcode, name, price, stock, market: req.user.market, active: true } },
+        update,
         upsert: true,
       },
     });

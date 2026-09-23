@@ -100,7 +100,7 @@ async function updateItems(req, res) {
   }
 
   const resolvedItems = [];
-  for (const { productId, quantity } of items) {
+  for (let { productId, quantity } of items) {
     if (!quantity || quantity <= 0) continue;
     const product = await Product.findOne({
       _id: productId,
@@ -110,9 +110,24 @@ async function updateItems(req, res) {
     if (!product) {
       return res.status(404).json({ message: 'Mahsulot topilmadi' });
     }
+
+    // 'dona' items are always whole pieces; 'kg' items are sold by weight,
+    // so round to gram precision to avoid floating-point noise (e.g. 0.1+0.2)
+    // from the cashier UI's +/- stepper.
+    if (product.unit === 'kg') {
+      quantity = Math.round(quantity * 1000) / 1000;
+    } else if (!Number.isInteger(quantity)) {
+      return res.status(400).json({
+        message: `"${product.name}" donalik mahsulot — miqdor butun son bo'lishi kerak`,
+        productId: product._id,
+      });
+    }
+    if (quantity <= 0) continue;
+
     if (quantity > product.stock) {
+      const unitLabel = product.unit === 'kg' ? 'kg' : 'dona';
       return res.status(409).json({
-        message: `Omborda faqat ${product.stock} dona "${product.name}" bor`,
+        message: `Omborda faqat ${product.stock} ${unitLabel} "${product.name}" bor`,
         productId: product._id,
         available: product.stock,
       });
@@ -122,6 +137,7 @@ async function updateItems(req, res) {
       barcode: product.barcode,
       name: product.name,
       price: product.price,
+      unit: product.unit,
       quantity,
       lineTotal: product.price * quantity,
     });
