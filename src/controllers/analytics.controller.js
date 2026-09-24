@@ -78,6 +78,36 @@ async function daily(req, res) {
   res.json({ days: rows.map((r) => ({ date: r._id, revenue: r.revenue, transactions: r.transactions })) });
 }
 
+// Current stock valued two ways: at selling price (what the shelf is worth
+// if sold today) and at cost price (what was actually paid for it — the
+// number that matters for "how much money is tied up in inventory"). Unlike
+// the other endpoints this isn't a Sale aggregation — it's a snapshot of
+// Product.stock right now, so quantity and unit (dona/kg) don't need any
+// special handling: stock * price is already correct per-unit either way.
+async function inventoryValue(req, res) {
+  const [result] = await Product.aggregate([
+    { $match: { market: new mongoose.Types.ObjectId(req.user.market), active: true } },
+    {
+      $group: {
+        _id: null,
+        totalSellValue: { $sum: { $multiply: ['$stock', '$price'] } },
+        totalCostValue: { $sum: { $multiply: ['$stock', { $ifNull: ['$costPrice', 0] }] } },
+        productCount: { $sum: 1 },
+        missingCostPriceCount: {
+          $sum: { $cond: [{ $eq: [{ $type: '$costPrice' }, 'missing'] }, 1, 0] },
+        },
+      },
+    },
+  ]);
+
+  res.json({
+    totalSellValue: result?.totalSellValue || 0,
+    totalCostValue: result?.totalCostValue || 0,
+    productCount: result?.productCount || 0,
+    missingCostPriceCount: result?.missingCostPriceCount || 0,
+  });
+}
+
 async function deadStock(req, res) {
   const days = Number(req.query.days) || 30;
   const cutoff = new Date();
@@ -110,4 +140,4 @@ async function deadStock(req, res) {
   res.json({ products: rows, total: allRows.length, page, limit, days });
 }
 
-module.exports = { summary, topProducts, daily, deadStock };
+module.exports = { summary, topProducts, daily, deadStock, inventoryValue };
