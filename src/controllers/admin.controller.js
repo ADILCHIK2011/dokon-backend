@@ -13,11 +13,19 @@ function addMonths(date, months) {
   return d;
 }
 
+// Markets flagged `alohida` (see models/Market.js) are deliberately outside
+// the superadmin's reach entirely — not listed, not creatable, not editable
+// through this API. They're provisioned directly via
+// scripts/createAlohidaMarket.js. Every handler below that looks up a single
+// market by id treats one as if it doesn't exist (plain 404), same as a
+// wrong id would.
+const ALOHIDA_FILTER = { alohida: { $ne: true } };
+
 async function list(req, res) {
   const { page, limit, skip } = paginationParams(req.query, { defaultLimit: 20, maxLimit: 100 });
   const [markets, total] = await Promise.all([
-    Market.find().sort({ createdAt: -1 }).skip(skip).limit(limit),
-    Market.countDocuments(),
+    Market.find(ALOHIDA_FILTER).sort({ createdAt: -1 }).skip(skip).limit(limit),
+    Market.countDocuments(ALOHIDA_FILTER),
   ]);
   res.json({ markets, total, page, limit });
 }
@@ -57,7 +65,7 @@ async function create(req, res) {
 }
 
 async function detail(req, res) {
-  const market = await Market.findById(req.params.id);
+  const market = await Market.findOne({ _id: req.params.id, ...ALOHIDA_FILTER });
   if (!market) {
     return res.status(404).json({ message: 'Doʻkon topilmadi' });
   }
@@ -86,7 +94,7 @@ async function detail(req, res) {
 
 async function renew(req, res) {
   const { months } = req.body;
-  const market = await Market.findById(req.params.id);
+  const market = await Market.findOne({ _id: req.params.id, ...ALOHIDA_FILTER });
   if (!market) {
     return res.status(404).json({ message: 'Doʻkon topilmadi' });
   }
@@ -103,8 +111,8 @@ async function update(req, res) {
   if (plan !== undefined && plan !== 'starter' && plan !== 'pro') {
     return res.status(400).json({ message: "Reja 'starter' yoki 'pro' bo'lishi kerak" });
   }
-  const market = await Market.findByIdAndUpdate(
-    req.params.id,
+  const market = await Market.findOneAndUpdate(
+    { _id: req.params.id, ...ALOHIDA_FILTER },
     {
       ...(name !== undefined && { name }),
       ...(active !== undefined && { active }),
@@ -120,6 +128,10 @@ async function update(req, res) {
 }
 
 async function notes(req, res) {
+  const market = await Market.findOne({ _id: req.params.id, ...ALOHIDA_FILTER }).select('_id');
+  if (!market) {
+    return res.status(404).json({ message: 'Doʻkon topilmadi' });
+  }
   const { page, limit, skip } = paginationParams(req.query, { defaultLimit: 20, maxLimit: 100 });
   const [notes, total] = await Promise.all([
     MarketNote.find({ market: req.params.id }).sort({ createdAt: -1 }).skip(skip).limit(limit),
