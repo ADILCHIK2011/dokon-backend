@@ -154,6 +154,12 @@ async function bulkImport(req, res) {
     const name = String(item.name || '').trim();
     const price = Number(item.price);
     const stock = item.stock !== undefined && item.stock !== '' ? Number(item.stock) : 0;
+    // Blank/omitted like 'unit' — don't overwrite an existing product's cost
+    // price on re-import when the column is left empty.
+    const costPrice =
+      item.costPrice !== undefined && item.costPrice !== '' && !Number.isNaN(Number(item.costPrice))
+        ? Number(item.costPrice)
+        : null;
     // Blank/omitted 'unit' column must NOT overwrite an existing product's
     // unit on re-import — leave it untouched via $setOnInsert instead, so
     // only brand-new rows get the 'dona' default.
@@ -167,6 +173,7 @@ async function bulkImport(req, res) {
 
     const set = { barcode, name, price, stock, market: req.user.market, active: true };
     if (unit) set.unit = unit;
+    if (costPrice !== null) set.costPrice = costPrice;
 
     const update = { $set: set };
     if (!unit) update.$setOnInsert = { unit: 'dona' };
