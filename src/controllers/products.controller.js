@@ -54,7 +54,26 @@ async function create(req, res) {
 
   const existing = await Product.findOne({ barcode, market: req.user.market });
   if (existing) {
-    return res.status(409).json({ message: 'Bu shtrix-kod allaqachon mavjud' });
+    if (existing.active) {
+      return res.status(409).json({ message: 'Bu shtrix-kod allaqachon mavjud' });
+    }
+    // Same barcode belongs to a previously deleted product (remove() below
+    // only soft-deletes — active: false — so the barcode+market unique index
+    // still holds it). Revive that record with the new details instead of
+    // blocking: otherwise re-adding a deleted product's barcode is stuck
+    // forever, since the "existing" copy is invisible everywhere else
+    // (list()/getByBarcode() both filter active: true).
+    existing.name = name;
+    existing.price = price;
+    existing.costPrice = costPrice;
+    existing.stock = stock || 0;
+    existing.unit = unit === 'kg' ? 'kg' : 'dona';
+    existing.active = true;
+    await existing.save();
+    emitToMarket(req.user.market, 'stock:changed', [
+      { productId: existing._id, stock: existing.stock, name: existing.name, barcode: existing.barcode },
+    ]);
+    return res.status(201).json({ product: existing });
   }
 
   const product = await Product.create({
