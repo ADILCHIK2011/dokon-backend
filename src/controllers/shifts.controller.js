@@ -1,6 +1,7 @@
 const Shift = require('../models/Shift');
 const User = require('../models/User');
 const { notifyOwnerChat } = require('../services/telegram');
+const { paginationParams } = require('../utils/pagination');
 
 function formatTashkentTime(date) {
   return date.toLocaleTimeString('uz-UZ', {
@@ -49,4 +50,19 @@ async function end(req, res) {
   res.json({ shift });
 }
 
-module.exports = { current, start, end };
+// Owner-only: every worker's shift log, newest first, for the Workers page.
+// Filterable to one cashier via ?cashier=<id> for a per-worker history view.
+async function history(req, res) {
+  const { cashier } = req.query;
+  const query = { market: req.user.market };
+  if (cashier) query.cashier = cashier;
+
+  const { page, limit, skip } = paginationParams(req.query, { defaultLimit: 20, maxLimit: 100 });
+  const [shifts, total] = await Promise.all([
+    Shift.find(query).sort({ startedAt: -1 }).skip(skip).limit(limit).populate('cashier', 'name'),
+    Shift.countDocuments(query),
+  ]);
+  res.json({ shifts, total, page, limit });
+}
+
+module.exports = { current, start, end, history };
