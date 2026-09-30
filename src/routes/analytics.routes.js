@@ -1,15 +1,18 @@
 const express = require('express');
-const { verifyToken, requireRole, loadMarket } = require('../middleware/auth.middleware');
+const { verifyToken, requireRole, loadMarket, requirePermission } = require('../middleware/auth.middleware');
 const { summary, topProducts, daily, deadStock, inventoryValue } = require('../controllers/analytics.controller');
 
 const router = express.Router();
 
-router.use(verifyToken, requireRole('owner'), loadMarket());
+router.use(verifyToken, requireRole('owner', 'cashier'), loadMarket());
 
-router.get('/summary', summary);
-router.get('/top-products', topProducts);
-router.get('/daily', daily);
-router.get('/dead-stock', deadStock);
-router.get('/inventory-value', inventoryValue);
+// summary/top-products/inventory-value are shared with OverviewPage, so a
+// cashier granted only the 'overview' permission (not 'analytics') still
+// needs them — otherwise that page breaks for them.
+router.get('/summary', requirePermission('overview', 'analytics'), summary);
+router.get('/top-products', requirePermission('overview', 'analytics'), topProducts);
+router.get('/daily', requirePermission('analytics'), daily);
+router.get('/dead-stock', requirePermission('dead-stock'), deadStock);
+router.get('/inventory-value', requirePermission('overview', 'analytics'), inventoryValue);
 
 module.exports = router;

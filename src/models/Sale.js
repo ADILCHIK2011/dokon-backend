@@ -15,10 +15,14 @@ const saleSchema = new mongoose.Schema({
   cashier: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   items: { type: [saleItemSchema], default: [] },
   total: { type: Number, required: true, default: 0 },
-  status: { type: String, enum: ['open', 'completed'], default: 'open' },
+  status: { type: String, enum: ['open', 'completed', 'cancelled'], default: 'open' },
   paymentMethod: { type: String, enum: ['cash', 'card', 'online'], default: 'cash' },
   createdAt: { type: Date, default: Date.now },
   completedAt: { type: Date },
+  // Set when a cashier cancels an open ticket. Cancelling is a soft-delete
+  // (see sales.controller.js's cancel()) so the AI night-cashier report can
+  // count how many tickets got cancelled the day before.
+  cancelledAt: { type: Date },
 });
 
 module.exports = mongoose.model('Sale', saleSchema);

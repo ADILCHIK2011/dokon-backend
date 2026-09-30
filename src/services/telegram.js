@@ -53,6 +53,18 @@ async function notifyOwners(marketId, text) {
   );
 }
 
+// Independent of notifyOwners()'s per-owner /start linking flow — sends to
+// one fixed chat (TELEGRAM_OWNER_CHAT_ID, set per-deployment in Railway,
+// since client-alohida's chat id changes on redeploy) regardless of Pro
+// plan or whether any owner has linked their account. Used for shift
+// start/end pings and the AI night-cashier report.
+async function notifyOwnerChat(text) {
+  if (!bot) return;
+  const chatId = process.env.TELEGRAM_OWNER_CHAT_ID;
+  if (!chatId) return;
+  await bot.sendMessage(chatId, text).catch((err) => console.error('Telegram notifyOwnerChat error', err.message));
+}
+
 async function handleStart(msg) {
   const chatId = msg.chat.id;
 
@@ -317,6 +329,239 @@ function scheduleSubscriptionReminderJob() {
   );
 }
 
+// ---- AI Night Cashier: a daily 08:00 report on yesterday's sales, sent to
+// TELEGRAM_OWNER_CHAT_ID. Deliberately separate from scheduleBriefingJob
+// (which is the owner's own Pro-plan AI briefing, per-market, pushed to
+// each linked owner) — this one is unconditional on plan, targets only the
+// single alohida market this deployment serves (there's one fixed chat id,
+// not one per market), and every number in it comes straight from Mongo
+// aggregates; the AI (when configured) only writes the analysis/prediction/
+// warning text around those numbers, never invents figures.
+const NIGHT_REPORT_LOW_STOCK_THRESHOLD = 5;
+const TASHKENT_OFFSET_MS = 5 * 60 * 60 * 1000;
+const TELEGRAM_MESSAGE_LIMIT = 4096;
+
+// Asia/Tashkent has no DST, so a fixed +5h offset always gives the correct
+// local calendar day boundaries as UTC instants — no timezone library needed.
+function tashkentDayRangeUTC(daysAgo) {
+  const tashkentNow = new Date(Date.now() + TASHKENT_OFFSET_MS);
+  const y = tashkentNow.getUTCFullYear();
+  const m = tashkentNow.getUTCMonth();
+  const d = tashkentNow.getUTCDate() - daysAgo;
+  return {
+    start: new Date(Date.UTC(y, m, d, 0, 0, 0, 0) - TASHKENT_OFFSET_MS),
+    end: new Date(Date.UTC(y, m, d, 23, 59, 59, 999) - TASHKENT_OFFSET_MS),
+  };
+}
+
+function formatDateUz(date) {
+  return date.toLocaleDateString('uz-UZ', { timeZone: 'Asia/Tashkent', day: '2-digit', month: '2-digit', year: 'numeric' });
+}
+
+async function collectNightCashierReportData(marketId) {
+  const { start, end } = tashkentDayRangeUTC(1);
+  const completedMatch = { market: marketId, status: 'completed', completedAt: { $gte: start, $lte: end } };
+
+  const [summary, paymentRows, topProductRows, cancelledCount, staleOpenCount, lowStock, outOfStock, unsellableCount] =
+    await Promise.all([
+      Sale.aggregate([
+        { $match: completedMatch },
+        { $group: { _id: null, totalRevenue: { $sum: '$total' }, totalTransactions: { $sum: 1 } } },
+      ]),
+      Sale.aggregate([
+        { $match: completedMatch },
+        { $group: { _id: '$paymentMethod', total: { $sum: '$total' }, count: { $sum: 1 } } },
+      ]),
+      Sale.aggregate([
+        { $match: completedMatch },
+        { $unwind: '$items' },
+        {
+          $group: {
+            _id: '$items.product',
+            name: { $first: '$items.name' },
+            unit: { $first: '$items.unit' },
+            quantity: { $sum: '$items.quantity' },
+            revenue: { $sum: '$items.lineTotal' },
+          },
+        },
+        { $sort: { revenue: -1 } },
+        { $limit: 10 },
+      ]),
+      Sale.countDocuments({ market: marketId, status: 'cancelled', cancelledAt: { $gte: start, $lte: end } }),
+      Sale.countDocuments({ market: marketId, status: 'open', createdAt: { $gte: start, $lte: end } }),
+      Product.find({ market: marketId, active: true, stock: { $gt: 0, $lte: NIGHT_REPORT_LOW_STOCK_THRESHOLD } })
+        .select('name stock unit')
+        .sort({ stock: 1 })
+        .limit(20),
+      Product.find({ market: marketId, stock: { $lte: 0 } }).select('name stock unit').limit(20),
+      Product.countDocuments({ market: marketId, $or: [{ active: false }, { stock: { $lte: 0 } }] }),
+    ]);
+
+  return {
+    dateLabel: formatDateUz(start),
+    totalRevenue: summary[0]?.totalRevenue || 0,
+    totalTransactions: summary[0]?.totalTransactions || 0,
+    paymentBreakdown: paymentRows.map((r) => ({ method: r._id, total: r.total, count: r.count })),
+    topProducts: topProductRows.map((r) => ({ name: r.name, unit: r.unit || 'dona', quantity: r.quantity, revenue: r.revenue })),
+    cancelledCount,
+    staleOpenCount,
+    lowStock,
+    outOfStock,
+    unsellableCount,
+  };
+}
+
+function buildNightCashierFallbackText(data) {
+  const top = data.topProducts[0];
+  const warnings = [];
+  if (data.outOfStock.length > 0) warnings.push(`${data.outOfStock.length} ta mahsulot tugagan.`);
+  if (data.lowStock.length > 0) warnings.push(`${data.lowStock.length} ta mahsulot kam qolgan.`);
+  if (data.cancelledCount > 0) warnings.push(`Kecha ${data.cancelledCount} ta buyurtma bekor qilingan.`);
+
+  return {
+    analysis:
+      data.totalTransactions > 0
+        ? `Kecha ${data.totalTransactions} ta chek orqali ${formatMoney(data.totalRevenue)} savdo qilindi.`
+        : 'Kecha savdo qayd etilmadi.',
+    hotPicks: top ? `${top.name} savdosi bugun ham yuqori bo'lishi mumkin.` : "Bashorat qilish uchun ma'lumot yetarli emas.",
+    warnings: warnings.length > 0 ? warnings.join(' ') : "Muhim ogohlantirish yo'q.",
+  };
+}
+
+// The only place the model is asked to touch numbers is by reading them back
+// out of `data` in its JSON reply's text fields — it never computes them.
+async function generateNightCashierAiText(data, marketName) {
+  const fallback = buildNightCashierFallbackText(data);
+  if (!process.env.GROQ_API_KEY) return fallback;
+
+  try {
+    const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+    const prompt = `Siz "${marketName}" do'koni uchun AI tungi kassir hisobotchisisiz. Faqat quyidagi JSON formatda javob qaytaring: {"analysis": "...", "hotPicks": "...", "warnings": "..."}.
+- analysis: kechagi savdo haqida 2-3 gapli qisqa, tabiiy tahlil (o'zbek tilida).
+- hotPicks: bugun sotilishi ehtimoli yuqori mahsulotlar haqida 1-2 gapli taxmin, berilgan top mahsulotlarga asoslanib.
+- warnings: kassir uchun 1-2 gapli muhim ogohlantirish — kam qolgan/tugagan mahsulot yoki bekor qilingan buyurtmalar bo'lsa aytib o'ting, bo'lmasa "Muhim ogohlantirish yo'q" deb yozing.
+Raqamlarni o'zingiz o'ylab topmang — faqat quyidagi haqiqiy ma'lumotlardan foydalaning:
+${JSON.stringify(data)}`;
+
+    const completion = await groq.chat.completions.create({
+      model: process.env.GROQ_MODEL || 'openai/gpt-oss-120b',
+      messages: [
+        { role: 'system', content: prompt },
+        { role: 'user', content: 'Hisobotni tayyorlang.' },
+      ],
+      temperature: 0.4,
+      response_format: { type: 'json_object' },
+    });
+
+    const parsed = JSON.parse(completion.choices[0]?.message?.content || '{}');
+    return {
+      analysis: parsed.analysis || fallback.analysis,
+      hotPicks: parsed.hotPicks || fallback.hotPicks,
+      warnings: parsed.warnings || fallback.warnings,
+    };
+  } catch (err) {
+    console.error('Night cashier AI text error', err.message);
+    return fallback;
+  }
+}
+
+function buildNightCashierMessage(data, aiText, marketName) {
+  const paymentLabels = { cash: 'Naqd', card: 'Karta', online: 'Onlayn' };
+  const unitLabel = (u) => (u === 'kg' ? 'kg' : 'dona');
+
+  const paymentLines = data.paymentBreakdown.length
+    ? data.paymentBreakdown.map((p) => `• ${paymentLabels[p.method] || p.method}: ${formatMoney(p.total)} (${p.count} ta)`).join('\n')
+    : "Kecha to'lov qayd etilmagan.";
+
+  const topLines = data.topProducts.length
+    ? data.topProducts
+        .map((p, i) => `${i + 1}. ${p.name} — ${p.quantity} ${unitLabel(p.unit)}, ${formatMoney(p.revenue)}`)
+        .join('\n')
+    : "Kecha mahsulot sotilmagan.";
+
+  const lowStockLines = data.lowStock.length
+    ? data.lowStock.map((p) => `• ${p.name} — ${p.stock} ${unitLabel(p.unit)}`).join('\n')
+    : "Kam qolgan mahsulot yo'q.";
+
+  const goal = Math.round(data.totalRevenue * 1.12);
+
+  return `🌙 AI Tungi Kassir Hisoboti — ${data.dateLabel} (${marketName})
+
+${aiText.analysis}
+
+💰 Kechagi umumiy savdo: ${formatMoney(data.totalRevenue)} (${data.totalTransactions} ta chek)
+
+💳 Naqd / karta / boshqa to'lovlar:
+${paymentLines}
+
+🏆 Eng ko'p sotilgan mahsulotlar:
+${topLines}
+
+↩️ Bekor qilingan buyurtmalar: ${data.cancelledCount} ta${
+    data.staleOpenCount > 0 ? `, ${data.staleOpenCount} ta ochiq (yakunlanmagan) qoldi` : ''
+  }
+
+📦 Bugungi mahsulot holati:
+• Kam qolgan (${NIGHT_REPORT_LOW_STOCK_THRESHOLD} yoki kamroq): ${data.lowStock.length} ta
+${lowStockLines}
+• Tugagan: ${data.outOfStock.length} ta
+• Bugun sotib bo'lmaydigan (nofaol yoki tugagan): ${data.unsellableCount} ta
+
+🎯 Bugungi maqsad: ${formatMoney(goal)}. Kecha: ${formatMoney(data.totalRevenue)}.
+
+🔥 Sotilishi ehtimoli yuqori mahsulotlar:
+${aiText.hotPicks}
+
+⚠️ Kassirga muhim ogohlantirishlar:
+${aiText.warnings}`;
+}
+
+// Telegram caps a single message at 4096 chars — split on blank-line
+// boundaries (section breaks in buildNightCashierMessage above) so a chunk
+// never cuts a sentence in half.
+function splitTelegramMessage(text) {
+  if (text.length <= TELEGRAM_MESSAGE_LIMIT) return [text];
+  const chunks = [];
+  let remaining = text;
+  while (remaining.length > TELEGRAM_MESSAGE_LIMIT) {
+    let cut = remaining.lastIndexOf('\n\n', TELEGRAM_MESSAGE_LIMIT);
+    if (cut <= 0) cut = TELEGRAM_MESSAGE_LIMIT;
+    chunks.push(remaining.slice(0, cut));
+    remaining = remaining.slice(cut).trimStart();
+  }
+  if (remaining) chunks.push(remaining);
+  return chunks;
+}
+
+async function sendNightCashierReport(marketId, marketName) {
+  const data = await collectNightCashierReportData(marketId);
+  const aiText = await generateNightCashierAiText(data, marketName);
+  const message = buildNightCashierMessage(data, aiText, marketName);
+  for (const chunk of splitTelegramMessage(message)) {
+    await notifyOwnerChat(chunk);
+  }
+}
+
+// Only one chat id is configured per deployment (TELEGRAM_OWNER_CHAT_ID), so
+// unlike scheduleBriefingJob this doesn't loop over every market — it finds
+// this deployment's one alohida market and reports on that.
+function scheduleNightCashierReportJob() {
+  cron.schedule(
+    '0 8 * * *',
+    async () => {
+      if (!process.env.TELEGRAM_OWNER_CHAT_ID) return;
+      const market = await Market.findOne({ alohida: true, active: true });
+      if (!market) return;
+      try {
+        await sendNightCashierReport(market._id, market.name);
+      } catch (err) {
+        console.error('Night cashier report error', err);
+      }
+    },
+    { timezone: 'Asia/Tashkent' }
+  );
+}
+
 function initBot() {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   if (!token) {
@@ -336,6 +581,7 @@ function initBot() {
   registerHandlers();
   scheduleBriefingJob();
   scheduleSubscriptionReminderJob();
+  scheduleNightCashierReportJob();
 }
 
 function getBotUsername() {
@@ -346,4 +592,4 @@ function isEnabled() {
   return bot !== null;
 }
 
-module.exports = { initBot, notifyOwners, getBotUsername, isEnabled };
+module.exports = { initBot, notifyOwners, notifyOwnerChat, getBotUsername, isEnabled };

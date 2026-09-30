@@ -1,6 +1,7 @@
 const mongoose = require('mongoose');
 const Sale = require('../models/Sale');
 const Product = require('../models/Product');
+const Shift = require('../models/Shift');
 const { emitToMarket } = require('../socket');
 const { paginationParams } = require('../utils/pagination');
 const { notifyOwners } = require('../services/telegram');
@@ -58,6 +59,15 @@ async function listHistory(req, res) {
 }
 
 async function create(req, res) {
+  // Owners aren't shift-tracked (see models/Shift.js) — only cashiers must
+  // start a shift before the till accepts a new sale.
+  if (req.user.role === 'cashier') {
+    const openShift = await Shift.findOne({ market: req.user.market, cashier: req.user.id, status: 'open' });
+    if (!openShift) {
+      return res.status(403).json({ message: 'Avval ishni boshlash kerak' });
+    }
+  }
+
   const sale = await Sale.create({
     market: req.user.market,
     cashier: req.user.id,
@@ -204,7 +214,11 @@ async function complete(req, res) {
 async function cancel(req, res) {
   const { error, message, sale } = await findOpenOwned(req);
   if (error) return res.status(error).json({ message });
-  await Sale.deleteOne({ _id: sale._id });
+  // Soft-delete: kept as 'cancelled' (not removed) so the AI night-cashier
+  // report can count cancellations — see services/telegram.js.
+  sale.status = 'cancelled';
+  sale.cancelledAt = new Date();
+  if (!(await saveWithConflictHandling(res, sale))) return;
   res.json({ message: 'Bekor qilindi' });
 }
 

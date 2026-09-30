@@ -5,6 +5,16 @@ const { notifyOwners } = require('../services/telegram');
 
 const STARTER_WORKER_LIMIT = 3;
 
+// Dashboard pages a cashier can be granted access to (see requirePermission
+// in auth.middleware.js). Kassa itself is always open to every cashier and
+// has no key here.
+const PERMISSION_KEYS = ['overview', 'products', 'sales-history', 'analytics', 'dead-stock', 'ai'];
+
+function sanitizePermissions(permissions) {
+  if (!Array.isArray(permissions)) return undefined;
+  return [...new Set(permissions.filter((p) => PERMISSION_KEYS.includes(p)))];
+}
+
 async function list(req, res) {
   const workers = await User.find({ role: 'cashier', market: req.user.market })
     .select('-passwordHash')
@@ -13,7 +23,7 @@ async function list(req, res) {
 }
 
 async function create(req, res) {
-  const { name, username, password } = req.body;
+  const { name, username, password, permissions } = req.body;
   if (!name || !username || !password) {
     return res.status(400).json({ message: 'Ism, login va parol kerak' });
   }
@@ -41,6 +51,7 @@ async function create(req, res) {
     role: 'cashier',
     market: req.user.market,
     active: true,
+    permissions: sanitizePermissions(permissions) || [],
   });
 
   const { passwordHash: _omit, ...safeWorker } = worker.toObject();
@@ -53,10 +64,15 @@ async function create(req, res) {
 }
 
 async function update(req, res) {
-  const { name, active } = req.body;
+  const { name, active, permissions } = req.body;
+  const sanitizedPermissions = sanitizePermissions(permissions);
   const worker = await User.findOneAndUpdate(
     { _id: req.params.id, role: 'cashier', market: req.user.market },
-    { ...(name && { name }), ...(active !== undefined && { active }) },
+    {
+      ...(name && { name }),
+      ...(active !== undefined && { active }),
+      ...(sanitizedPermissions !== undefined && { permissions: sanitizedPermissions }),
+    },
     { new: true, runValidators: true }
   ).select('-passwordHash');
 

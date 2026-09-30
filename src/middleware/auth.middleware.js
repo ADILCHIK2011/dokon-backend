@@ -1,4 +1,5 @@
 const jwt = require('jsonwebtoken');
+const User = require('../models/User');
 const { getMarketStatus } = require('../services/marketCache');
 
 function verifyToken(req, res, next) {
@@ -55,4 +56,23 @@ function requirePlan(...plans) {
   };
 }
 
-module.exports = { verifyToken, requireRole, loadMarket, requirePlan };
+// Page-level access for cashiers, set per-worker by the owner (User.permissions).
+// Owners always pass — they're not restricted by this system, only cashiers
+// are. Not baked into the JWT (same reasoning as loadMarket: an owner can
+// change a cashier's permissions and expects it to take effect on that
+// cashier's next request, not after a 12h token expiry/re-login), so this
+// costs one extra User lookup per gated request for cashiers only.
+function requirePermission(...keys) {
+  return async (req, res, next) => {
+    if (req.user.role === 'owner') return next();
+    if (req.user.role !== 'cashier') return res.status(403).json({ message: 'Ruxsat yoʻq' });
+
+    const user = await User.findById(req.user.id).select('permissions active');
+    if (!user || !user.active || !keys.some((k) => user.permissions.includes(k))) {
+      return res.status(403).json({ message: 'Ruxsat yoʻq' });
+    }
+    next();
+  };
+}
+
+module.exports = { verifyToken, requireRole, loadMarket, requirePlan, requirePermission };

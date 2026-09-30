@@ -21,6 +21,7 @@ function publicUser(user, market) {
     name: user.name,
     username: user.username,
     role: user.role,
+    permissions: user.permissions || [],
     market: market
       ? {
           id: market._id,

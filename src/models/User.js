@@ -9,6 +9,11 @@ const userSchema = new mongoose.Schema({
   active: { type: Boolean, default: true },
   createdAt: { type: Date, default: Date.now },
   telegramChatId: { type: String },
+  // Which dashboard pages a cashier can see, set by the market owner on the
+  // Workers page (see workers.controller.js's PERMISSION_KEYS whitelist).
+  // Cashiers always have the Kassa page regardless — no key needed for it.
+  // Meaningless for owner/superadmin, who bypass every permission check.
+  permissions: { type: [String], default: [] },
 });
 
 // Usernames only need to be unique within a market (two markets can both
