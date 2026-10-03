@@ -20,8 +20,8 @@ const server = http.createServer(app);
 initSocket(server);
 
 connectDB()
-  .then(() => {
-    initBot();
+  .then(async () => {
+    await initBot();
     scheduleDailyMarketNotes();
     server.listen(PORT, () => {
       console.log(`Server listening on port ${PORT}`);

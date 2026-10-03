@@ -4,7 +4,7 @@ const Market = require('../models/Market');
 const Briefing = require('../models/Briefing');
 const { TOOLS, executeTool } = require('../services/aiTools');
 
-const MAX_ITERATIONS = 5;
+const MAX_ITERATIONS = 8;
 const MAX_HISTORY_MESSAGES = 20;
 
 function buildSystemPrompt(marketName, today) {
@@ -49,6 +49,11 @@ async function runToolLoop(groq, chatMessages, marketId, { tools = TOOLS, execut
       tools,
       tool_choice: 'auto',
       temperature: 0.3,
+      // gpt-oss models support a reasoning_effort knob (low/medium/high) on
+      // Groq; this assistant is a low-volume, analysis-heavy business chat
+      // (not a high-throughput endpoint), so the extra latency/tokens of
+      // "high" are worth it for better multi-step tool-planning and math.
+      reasoning_effort: 'high',
     });
 
     const message = completion.choices[0].message;

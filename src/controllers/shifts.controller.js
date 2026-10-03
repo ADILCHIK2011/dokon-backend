@@ -1,5 +1,6 @@
 const Shift = require('../models/Shift');
 const User = require('../models/User');
+const Sale = require('../models/Sale');
 const { notifyOwnerChat } = require('../services/telegram');
 const { paginationParams } = require('../utils/pagination');
 
@@ -50,6 +51,32 @@ async function end(req, res) {
   res.json({ shift });
 }
 
+// Attaches how much each shift actually sold — one Sale query covering every
+// shift's time span, then bucketed in memory per shift, instead of one
+// aggregate per shift (a Workers-page history page is at most 100 rows).
+async function attachRevenue(shifts, marketId) {
+  if (shifts.length === 0) return [];
+
+  const cashierIds = [...new Set(shifts.map((s) => s.cashier._id.toString()))];
+  const earliestStart = shifts.reduce((min, s) => (s.startedAt < min ? s.startedAt : min), shifts[0].startedAt);
+  const sales = await Sale.find({
+    market: marketId,
+    status: 'completed',
+    cashier: { $in: cashierIds },
+    completedAt: { $gte: earliestStart },
+  }).select('cashier total completedAt');
+
+  return shifts.map((shift) => {
+    const cashierId = shift.cashier._id.toString();
+    const end = shift.endedAt || new Date();
+    const shiftSales = sales.filter(
+      (s) => s.cashier.toString() === cashierId && s.completedAt >= shift.startedAt && s.completedAt <= end
+    );
+    const revenue = shiftSales.reduce((sum, s) => sum + s.total, 0);
+    return { ...shift.toObject(), revenue, transactions: shiftSales.length };
+  });
+}
+
 // Owner-only: every worker's shift log, newest first, for the Workers page.
 // Filterable to one cashier via ?cashier=<id> for a per-worker history view.
 async function history(req, res) {
@@ -58,10 +85,11 @@ async function history(req, res) {
   if (cashier) query.cashier = cashier;
 
   const { page, limit, skip } = paginationParams(req.query, { defaultLimit: 20, maxLimit: 100 });
-  const [shifts, total] = await Promise.all([
+  const [shiftsRaw, total] = await Promise.all([
     Shift.find(query).sort({ startedAt: -1 }).skip(skip).limit(limit).populate('cashier', 'name'),
     Shift.countDocuments(query),
   ]);
+  const shifts = await attachRevenue(shiftsRaw, req.user.market);
   res.json({ shifts, total, page, limit });
 }
 

@@ -5,6 +5,7 @@ const User = require('../models/User');
 const Market = require('../models/Market');
 const Product = require('../models/Product');
 const Sale = require('../models/Sale');
+const TelegramDailyLog = require('../models/TelegramDailyLog');
 const Groq = require('groq-sdk');
 const { getOrCreateBriefing, runToolLoop } = require('../controllers/ai.controller');
 const { buildMarketingTools, executeMarketingTool, buildMarketingSystemPrompt } = require('./marketingAiTools');
@@ -90,6 +91,7 @@ async function handleStart(msg) {
 async function handleStop(msg) {
   const chatId = msg.chat.id;
   loginSessions.delete(chatId);
+  marketingChatHistory.delete(chatId);
   const owner = await User.findOne({ telegramChatId: String(chatId) });
   if (owner) {
     owner.telegramChatId = undefined;
@@ -211,6 +213,16 @@ async function handleLowStock(chatId, marketId) {
   await bot.sendMessage(chatId, `📦 Kam qolgan mahsulotlar:\n\n${lines.join('\n')}`, KEYBOARD);
 }
 
+// In-memory per-chat scrollback for handleMarketingChat, so a follow-up
+// question ("u haqida ko'proq ayt" / "nega?") isn't answered cold — each
+// question/answer pair is treated independently otherwise, which reads as
+// the bot "forgetting" what was just discussed. Capped at the last few turns
+// (not just MAX_HISTORY_MESSAGES-style trimming at request time) to bound
+// memory for a long-running process serving many chats; cleared on /stop
+// alongside the rest of that chat's state.
+const MARKETING_CHAT_HISTORY_TURNS = 6;
+const marketingChatHistory = new Map();
+
 // Anything typed that isn't a login step or a keyboard button — free-text
 // marketing/business questions, answered by the same tool-calling loop the
 // dashboard AI assistant uses (ai.controller.js's runToolLoop), but with the
@@ -223,8 +235,10 @@ async function handleMarketingChat(chatId, marketId, marketName, question) {
   }
 
   const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+  const history = marketingChatHistory.get(chatId) || [];
   const chatMessages = [
     { role: 'system', content: buildMarketingSystemPrompt(marketName) },
+    ...history,
     { role: 'user', content: question },
   ];
 
@@ -235,6 +249,11 @@ async function handleMarketingChat(chatId, marketId, marketName, question) {
       context: { question },
     });
     await bot.sendMessage(chatId, text || "Kechirasiz, javob topilmadi.", KEYBOARD);
+
+    if (text) {
+      const nextHistory = [...history, { role: 'user', content: question }, { role: 'assistant', content: text }];
+      marketingChatHistory.set(chatId, nextHistory.slice(-MARKETING_CHAT_HISTORY_TURNS * 2));
+    }
   } catch (err) {
     console.error('Telegram marketing chat error', err);
     await bot.sendMessage(chatId, "AI xizmati bilan bog'lanishda xatolik yuz berdi.", KEYBOARD);
@@ -260,7 +279,12 @@ function registerHandlers() {
         return User.findOne({ telegramChatId: String(msg.chat.id) })
           .populate('market', 'name plan active subscriptionExpiresAt')
           .then((owner) => {
-            if (!owner) return null;
+            if (!owner) {
+              // Not mid-login and not linked to any market — without this the
+              // bot just stays silent, which looks broken/unresponsive to
+              // anyone who types before sending /start.
+              return bot.sendMessage(msg.chat.id, "Ulanish uchun /start yuboring.");
+            }
             if (!isMarketPro(owner.market)) {
               owner.telegramChatId = undefined;
               return owner
@@ -280,19 +304,52 @@ function registerHandlers() {
   bot.on('polling_error', (err) => console.error('Telegram polling error', err.message));
 }
 
+// node-cron only fires a tick if the process happens to be alive at that
+// exact minute — a redeploy/restart around 08:00 silently drops that day's
+// push with no retry. TelegramDailyLog is the dedup record that makes it
+// safe to also attempt these sends from catchUpMissedDailyReports() on boot:
+// "already logged for today" means the cron tick (or an earlier catch-up)
+// already got it out, so a second attempt is a no-op instead of a duplicate.
+function todayUtcDateKey() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+async function alreadySentToday(marketId, type) {
+  const existing = await TelegramDailyLog.findOne({ market: marketId, type, date: todayUtcDateKey() });
+  return !!existing;
+}
+
+async function markSentToday(marketId, type) {
+  try {
+    await TelegramDailyLog.create({ market: marketId, type, date: todayUtcDateKey() });
+  } catch (err) {
+    // Unique-index race (cron tick and a catch-up call landing at the same
+    // moment) — the message already went out either way, nothing to do.
+    if (err.code !== 11000) throw err;
+  }
+}
+
+async function runMorningBriefingForMarket(marketId) {
+  if (await alreadySentToday(marketId, 'briefing')) return;
+  const result = await getOrCreateBriefing(marketId);
+  if (result.error) return;
+  await notifyOwners(marketId, `📊 Kunlik hisobot:\n\n${result.text}`);
+  await markSentToday(marketId, 'briefing');
+}
+
 // Pushed only to Pro markets — matches the Pro-only gate on GET
-// /api/ai/briefing (requirePlan('pro') in ai.routes.js).
+// /api/ai/briefing (requirePlan('pro') in ai.routes.js). Alohida markets are
+// excluded: they already get the richer scheduleNightCashierReportJob at the
+// same 08:00 slot, so without this filter their owner would get two
+// overlapping "here's your day" messages back to back every morning.
 function scheduleBriefingJob() {
   cron.schedule(
     '0 8 * * *',
     async () => {
-      const markets = await Market.find({ plan: 'pro', active: true }).select('_id');
+      const markets = await Market.find({ plan: 'pro', active: true, alohida: { $ne: true } }).select('_id');
       for (const market of markets) {
         try {
-          const result = await getOrCreateBriefing(market._id);
-          if (!result.error) {
-            await notifyOwners(market._id, `📊 Kunlik hisobot:\n\n${result.text}`);
-          }
+          await runMorningBriefingForMarket(market._id);
         } catch (err) {
           console.error('Telegram daily briefing job error', err);
         }
@@ -450,6 +507,7 @@ ${JSON.stringify(data)}`;
         { role: 'user', content: 'Hisobotni tayyorlang.' },
       ],
       temperature: 0.4,
+      reasoning_effort: 'high',
       response_format: { type: 'json_object' },
     });
 
@@ -542,6 +600,12 @@ async function sendNightCashierReport(marketId, marketName) {
   }
 }
 
+async function sendNightCashierReportIfDue(marketId, marketName) {
+  if (await alreadySentToday(marketId, 'night-cashier')) return;
+  await sendNightCashierReport(marketId, marketName);
+  await markSentToday(marketId, 'night-cashier');
+}
+
 // Only one chat id is configured per deployment (TELEGRAM_OWNER_CHAT_ID), so
 // unlike scheduleBriefingJob this doesn't loop over every market — it finds
 // this deployment's one alohida market and reports on that.
@@ -553,7 +617,7 @@ function scheduleNightCashierReportJob() {
       const market = await Market.findOne({ alohida: true, active: true });
       if (!market) return;
       try {
-        await sendNightCashierReport(market._id, market.name);
+        await sendNightCashierReportIfDue(market._id, market.name);
       } catch (err) {
         console.error('Night cashier report error', err);
       }
@@ -562,7 +626,54 @@ function scheduleNightCashierReportJob() {
   );
 }
 
-function initBot() {
+// Runs once at boot, after registerHandlers()/the cron schedules are set up.
+// If the process starts after 08:00 Tashkent (a redeploy mid-morning, a
+// crash-restart, etc.), that day's 08:00 cron tick already silently passed —
+// this sends anything still missing for today instead of waiting until
+// tomorrow's tick. alreadySentToday() inside each send path makes this safe
+// to call unconditionally: a normal boot before 08:00 just finds nothing due
+// yet, and a boot right after the cron tick already fired finds it already
+// logged and skips.
+function currentTashkentHour() {
+  return new Date(Date.now() + TASHKENT_OFFSET_MS).getUTCHours();
+}
+
+async function catchUpMissedDailyReports() {
+  if (currentTashkentHour() < 8) return;
+
+  try {
+    const proMarkets = await Market.find({ plan: 'pro', active: true, alohida: { $ne: true } }).select('_id');
+    for (const market of proMarkets) {
+      try {
+        await runMorningBriefingForMarket(market._id);
+      } catch (err) {
+        console.error('Telegram briefing catch-up error', market._id.toString(), err);
+      }
+    }
+  } catch (err) {
+    console.error('Telegram briefing catch-up error', err);
+  }
+
+  if (process.env.TELEGRAM_OWNER_CHAT_ID) {
+    try {
+      const alohidaMarket = await Market.findOne({ alohida: true, active: true });
+      if (alohidaMarket) {
+        await sendNightCashierReportIfDue(alohidaMarket._id, alohidaMarket.name);
+      }
+    } catch (err) {
+      console.error('Telegram night-cashier catch-up error', err);
+    }
+  }
+}
+
+// Awaited by server.js before it starts accepting HTTP requests. getMe() is
+// what fills in botUsername, and GET /api/telegram/status (SettingsPage's
+// "Telegramda ochish" link) reads that value — if the server started
+// serving requests while this was still in flight, any owner who opened
+// Settings in that window saw "Bot bu serverda hali sozlanmagan" even
+// though the bot was in fact configured and running, just not done
+// introducing itself yet.
+async function initBot() {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   if (!token) {
     console.log('TELEGRAM_BOT_TOKEN not set — Telegram bot disabled');
@@ -570,18 +681,24 @@ function initBot() {
   }
 
   bot = new TelegramBot(token, { polling: true });
-  bot
-    .getMe()
-    .then((me) => {
-      botUsername = me.username;
-      console.log(`Telegram bot @${botUsername} started`);
-    })
-    .catch((err) => console.error('Telegram getMe error', err.message));
+  try {
+    const me = await bot.getMe();
+    botUsername = me.username;
+    console.log(`Telegram bot @${botUsername} started`);
+  } catch (err) {
+    console.error('Telegram getMe error', err.message);
+  }
 
   registerHandlers();
   scheduleBriefingJob();
   scheduleSubscriptionReminderJob();
   scheduleNightCashierReportJob();
+
+  try {
+    await catchUpMissedDailyReports();
+  } catch (err) {
+    console.error('Telegram catch-up error', err);
+  }
 }
 
 function getBotUsername() {

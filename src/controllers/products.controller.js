@@ -2,6 +2,7 @@ const Product = require('../models/Product');
 const { emitToMarket } = require('../socket');
 const { paginationParams } = require('../utils/pagination');
 const { escapeRegex } = require('../utils/escapeRegex');
+const { buildNameSearchFilter } = require('../utils/nameSearch');
 const { notifyOwners } = require('../services/telegram');
 const { formatMoney } = require('../utils/formatMoney');
 const { randomEan13 } = require('../utils/ean13');
@@ -9,7 +10,7 @@ const { randomEan13 } = require('../utils/ean13');
 async function list(req, res) {
   const filter = { market: req.user.market, active: true };
   if (req.query.search) {
-    filter.name = { $regex: escapeRegex(req.query.search), $options: 'i' };
+    Object.assign(filter, buildNameSearchFilter(req.query.search));
   }
   if (req.query.maxStock !== undefined) {
     filter.stock = { $lte: Number(req.query.maxStock) };
@@ -21,6 +22,28 @@ async function list(req, res) {
     Product.countDocuments(filter),
   ]);
   res.json({ products, total, page, limit });
+}
+
+// Quick name search for the Kassa autocomplete. Kept permission-free like
+// getByBarcode below — a cashier can already pull up any product by typing
+// its exact barcode, so letting them find the same product by partial name
+// is the same checkout capability, not a new one. costPrice is left out
+// since this is a much broader browse surface (partial name vs. an exact
+// code the cashier must already know) and margin data has no reason to ride
+// along with it.
+async function searchQuick(req, res) {
+  const q = String(req.query.q || '').trim();
+  const nameFilter = buildNameSearchFilter(q);
+  if (!nameFilter) return res.json({ products: [] });
+  const products = await Product.find({
+    market: req.user.market,
+    active: true,
+    ...nameFilter,
+  })
+    .select('name price barcode unit stock')
+    .sort({ name: 1 })
+    .limit(8);
+  res.json({ products });
 }
 
 async function getByBarcode(req, res) {
@@ -220,4 +243,4 @@ async function bulkImport(req, res) {
   });
 }
 
-module.exports = { list, getByBarcode, generateBarcode, create, update, remove, bulkImport };
+module.exports = { list, searchQuick, getByBarcode, generateBarcode, create, update, remove, bulkImport };
