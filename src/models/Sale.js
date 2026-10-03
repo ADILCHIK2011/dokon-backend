@@ -26,4 +26,15 @@ const saleSchema = new mongoose.Schema({
   cancelledAt: { type: Date },
 });
 
+// Sale had no indexes at all beyond _id — sales history, every analytics
+// endpoint, every AI reporting tool, the night-cashier report, and the
+// per-shift revenue breakdown all filter by market (+status, +completedAt
+// range, +cashier) and were full-collection-scanning every sale ever made
+// by every tenant on every request. These two compound indexes cover that
+// family of query shapes; dropping the leading `market` field out of either
+// would defeat the whole point, since market is the field every query filters
+// on first (see CLAUDE.md's multi-tenancy note).
+saleSchema.index({ market: 1, status: 1, completedAt: -1 });
+saleSchema.index({ market: 1, cashier: 1, status: 1, completedAt: -1 });
+
 module.exports = mongoose.model('Sale', saleSchema);

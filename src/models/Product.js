@@ -17,4 +17,14 @@ const productSchema = new mongoose.Schema({
 
 productSchema.index({ barcode: 1, market: 1 }, { unique: true });
 
+// Without these, every Products-page list/search and every low-stock widget
+// (ProductsPage, OverviewPage, NotificationBell, the AI tools, dead-stock)
+// was a full collection scan across every product of every tenant, sorted
+// in memory — which MongoDB caps at 32MB and will hard-error past, not just
+// slow down. These cover the two sort orders list() actually uses (by name,
+// and by stock for the maxStock/low-stock path) scoped to one market's
+// active products.
+productSchema.index({ market: 1, active: 1, name: 1 });
+productSchema.index({ market: 1, active: 1, stock: 1 });
+
 module.exports = mongoose.model('Product', productSchema);

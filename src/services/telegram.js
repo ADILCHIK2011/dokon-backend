@@ -11,6 +11,9 @@ const { getOrCreateBriefing, runToolLoop } = require('../controllers/ai.controll
 const { buildMarketingTools, executeMarketingTool, buildMarketingSystemPrompt } = require('./marketingAiTools');
 const { formatMoney } = require('../utils/formatMoney');
 const { unitLabel } = require('../utils/units');
+const { buildXlsxBuffer } = require('../utils/xlsxBuffer');
+
+const PAYMENT_LABELS_UZ = { cash: 'Naqd', card: 'Karta', online: 'Onlayn' };
 
 let bot = null;
 let botUsername = null;
@@ -315,19 +318,27 @@ function todayUtcDateKey() {
   return new Date().toISOString().slice(0, 10);
 }
 
-async function alreadySentToday(marketId, type) {
-  const existing = await TelegramDailyLog.findOne({ market: marketId, type, date: todayUtcDateKey() });
+async function alreadySent(marketId, type, dateKey) {
+  const existing = await TelegramDailyLog.findOne({ market: marketId, type, date: dateKey });
   return !!existing;
 }
 
-async function markSentToday(marketId, type) {
+async function markSent(marketId, type, dateKey) {
   try {
-    await TelegramDailyLog.create({ market: marketId, type, date: todayUtcDateKey() });
+    await TelegramDailyLog.create({ market: marketId, type, date: dateKey });
   } catch (err) {
     // Unique-index race (cron tick and a catch-up call landing at the same
     // moment) — the message already went out either way, nothing to do.
     if (err.code !== 11000) throw err;
   }
+}
+
+async function alreadySentToday(marketId, type) {
+  return alreadySent(marketId, type, todayUtcDateKey());
+}
+
+async function markSentToday(marketId, type) {
+  return markSent(marketId, type, todayUtcDateKey());
 }
 
 async function runMorningBriefingForMarket(marketId) {
@@ -525,10 +536,10 @@ ${JSON.stringify(data)}`;
 }
 
 function buildNightCashierMessage(data, aiText, marketName) {
-  const paymentLabels = { cash: 'Naqd', card: 'Karta', online: 'Onlayn' };
-
   const paymentLines = data.paymentBreakdown.length
-    ? data.paymentBreakdown.map((p) => `• ${paymentLabels[p.method] || p.method}: ${formatMoney(p.total)} (${p.count} ta)`).join('\n')
+    ? data.paymentBreakdown
+        .map((p) => `• ${PAYMENT_LABELS_UZ[p.method] || p.method}: ${formatMoney(p.total)} (${p.count} ta)`)
+        .join('\n')
     : "Kecha to'lov qayd etilmagan.";
 
   const topLines = data.topProducts.length
@@ -626,6 +637,171 @@ function scheduleNightCashierReportJob() {
   );
 }
 
+// ---- Monthly report: two .xlsx documents (the month's sales history, and
+// the product catalog as it stood once that month was over) sent straight
+// to every linked owner's chat, once the month they cover has fully ended.
+
+// Like notifyOwners but for a file attachment instead of plain text — same
+// Pro-plan gate and "every owner with a linked chat" fan-out.
+async function notifyOwnersDocument(marketId, buffer, filename, caption) {
+  if (!bot) return;
+  const market = await Market.findById(marketId).select('plan active subscriptionExpiresAt');
+  if (!isMarketPro(market)) return;
+
+  const owners = await User.find({ market: marketId, role: 'owner', telegramChatId: { $exists: true, $ne: null } });
+  await Promise.all(
+    owners.map((owner) =>
+      bot
+        .sendDocument(
+          owner.telegramChatId,
+          buffer,
+          { caption },
+          { filename, contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }
+        )
+        .catch((err) => console.error('Telegram sendDocument error', err.message))
+    )
+  );
+}
+
+// "The calendar month immediately before the one `now` falls in" — well
+// defined at any moment, which is what lets the catch-up path below run
+// unconditionally on every boot instead of needing an hour/day gate like
+// the daily jobs do: a previous month is, by definition, always already
+// fully elapsed, so there's no "not due yet" case to guard against.
+function previousTashkentMonthRange() {
+  const tashkentNow = new Date(Date.now() + TASHKENT_OFFSET_MS);
+  const y = tashkentNow.getUTCFullYear();
+  const m = tashkentNow.getUTCMonth();
+  const prevMonthFirst = new Date(Date.UTC(y, m - 1, 1));
+  const py = prevMonthFirst.getUTCFullYear();
+  const pm = prevMonthFirst.getUTCMonth();
+  const start = new Date(Date.UTC(py, pm, 1, 0, 0, 0, 0) - TASHKENT_OFFSET_MS);
+  // Date.UTC(py, pm + 1, 0, ...) is "day 0 of next month" = the last day of
+  // this one, so this stays correct across every month length without a
+  // lookup table.
+  const end = new Date(Date.UTC(py, pm + 1, 0, 23, 59, 59, 999) - TASHKENT_OFFSET_MS);
+  const key = `${py}-${String(pm + 1).padStart(2, '0')}`;
+  const label = start.toLocaleDateString('uz-UZ', { timeZone: 'Asia/Tashkent', month: 'long', year: 'numeric' });
+  return { key, start, end, label };
+}
+
+async function buildMonthlySalesXlsx(marketId, range) {
+  const sales = await Sale.find({
+    market: marketId,
+    status: 'completed',
+    completedAt: { $gte: range.start, $lte: range.end },
+  })
+    .sort({ completedAt: 1 })
+    .populate('cashier', 'name')
+    .lean();
+
+  return buildXlsxBuffer({
+    sheetName: 'Savdolar',
+    columns: [
+      { header: 'Sana', key: 'date', width: 20 },
+      { header: 'Kassir', key: 'cashier', width: 16 },
+      { header: "To'lov turi", key: 'payment', width: 14 },
+      { header: 'Mahsulotlar tafsiloti', key: 'itemsDetail', width: 50 },
+      { header: 'Mahsulotlar soni', key: 'itemCount', width: 14, format: 'number' },
+      { header: 'Jami', key: 'total', width: 16, format: 'currency' },
+    ],
+    rows: sales.map((s) => ({
+      date: new Date(s.completedAt).toLocaleString('uz-UZ', { timeZone: 'Asia/Tashkent' }),
+      cashier: s.cashier?.name || '—',
+      payment: PAYMENT_LABELS_UZ[s.paymentMethod] || s.paymentMethod,
+      itemsDetail: s.items.map((it) => `${it.name} x${it.quantity} ${unitLabel(it.unit)}`).join(', '),
+      itemCount: s.items.length,
+      total: s.total,
+    })),
+  });
+}
+
+async function buildMonthlyProductsXlsx(marketId) {
+  const products = await Product.find({ market: marketId, active: true }).sort({ name: 1 }).lean();
+
+  return buildXlsxBuffer({
+    sheetName: 'Mahsulotlar',
+    columns: [
+      { header: 'Shtrix-kod', key: 'barcode', width: 18 },
+      { header: 'Nomi', key: 'name', width: 32 },
+      { header: 'Narxi', key: 'price', width: 14, format: 'currency' },
+      { header: 'Kirish narxi', key: 'costPrice', width: 14, format: 'currency' },
+      { header: 'Qoldiq', key: 'stock', width: 12, format: 'number' },
+    ],
+    rows: products.map((p) => ({
+      barcode: p.barcode,
+      name: p.name,
+      price: p.price,
+      costPrice: p.costPrice ?? '',
+      stock: p.stock,
+    })),
+  });
+}
+
+async function sendMonthlyReportIfDue(market) {
+  const range = previousTashkentMonthRange();
+  // Market didn't exist yet during the month being reported on — nothing
+  // real to send (e.g. a market created this month would otherwise get an
+  // empty "last month" report the moment it's linked).
+  if (market.createdAt && market.createdAt > range.end) return;
+  if (await alreadySent(market._id, 'monthly-report', range.key)) return;
+
+  const [salesXlsx, productsXlsx] = await Promise.all([
+    buildMonthlySalesXlsx(market._id, range),
+    buildMonthlyProductsXlsx(market._id),
+  ]);
+
+  await notifyOwners(market._id, `📦 ${range.label} uchun oylik hisobot fayllari tayyor:`);
+  await notifyOwnersDocument(
+    market._id,
+    salesXlsx,
+    `savdolar-tarixi-${range.key}.xlsx`,
+    `${range.label} — savdolar tarixi`
+  );
+  await notifyOwnersDocument(
+    market._id,
+    productsXlsx,
+    `mahsulotlar-${range.key}.xlsx`,
+    `${range.label} oxiridagi mahsulotlar ro'yxati`
+  );
+
+  await markSent(market._id, 'monthly-report', range.key);
+}
+
+// Every Pro market gets this, including alohida — unlike the daily briefing,
+// there's no existing alohida-specific monthly equivalent for it to
+// duplicate.
+function scheduleMonthlyReportJob() {
+  cron.schedule(
+    '30 8 1 * *',
+    async () => {
+      const markets = await Market.find({ plan: 'pro', active: true }).select('_id createdAt');
+      for (const market of markets) {
+        try {
+          await sendMonthlyReportIfDue(market);
+        } catch (err) {
+          console.error('Telegram monthly report error', market._id.toString(), err);
+        }
+      }
+    },
+    { timezone: 'Asia/Tashkent' }
+  );
+}
+
+// No hour/day gate needed (see previousTashkentMonthRange's comment) — safe
+// to run on every boot. The common case (most boots, most days) is one cheap
+// findOne per Pro market that finds the month already logged and skips.
+async function catchUpMissedMonthlyReports() {
+  const markets = await Market.find({ plan: 'pro', active: true }).select('_id createdAt');
+  for (const market of markets) {
+    try {
+      await sendMonthlyReportIfDue(market);
+    } catch (err) {
+      console.error('Telegram monthly report catch-up error', market._id.toString(), err);
+    }
+  }
+}
+
 // Runs once at boot, after registerHandlers()/the cron schedules are set up.
 // If the process starts after 08:00 Tashkent (a redeploy mid-morning, a
 // crash-restart, etc.), that day's 08:00 cron tick already silently passed —
@@ -693,11 +869,18 @@ async function initBot() {
   scheduleBriefingJob();
   scheduleSubscriptionReminderJob();
   scheduleNightCashierReportJob();
+  scheduleMonthlyReportJob();
 
   try {
     await catchUpMissedDailyReports();
   } catch (err) {
     console.error('Telegram catch-up error', err);
+  }
+
+  try {
+    await catchUpMissedMonthlyReports();
+  } catch (err) {
+    console.error('Telegram monthly catch-up error', err);
   }
 }
 

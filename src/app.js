@@ -17,7 +17,13 @@ const app = express();
 
 app.use(helmet());
 app.use(cors({ origin: corsOrigins }));
-app.use(express.json());
+// Default express.json() limit is 100kb — a few hundred rows of a product
+// import already exceeds that, so Express was hard-rejecting (413) before
+// bulkImport ever ran. This is an authenticated, internal multi-tenant API
+// (not an anonymous public upload surface), so a generous limit here is a
+// reasonable trade for not silently capping how large a catalog import or
+// bulk edit can be.
+app.use(express.json({ limit: '20mb' }));
 
 // Login endpoints are the one publicly-reachable surface that takes a
 // password guess — throttle per IP so they can't be brute-forced.
