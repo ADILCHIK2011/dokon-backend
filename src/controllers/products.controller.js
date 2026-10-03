@@ -6,6 +6,7 @@ const { buildNameSearchFilter } = require('../utils/nameSearch');
 const { notifyOwners } = require('../services/telegram');
 const { formatMoney } = require('../utils/formatMoney');
 const { randomEan13 } = require('../utils/ean13');
+const { normalizeUnit, unitLabel } = require('../utils/units');
 
 async function list(req, res) {
   const filter = { market: req.user.market, active: true };
@@ -90,7 +91,7 @@ async function create(req, res) {
     existing.price = price;
     existing.costPrice = costPrice;
     existing.stock = stock || 0;
-    existing.unit = unit === 'kg' ? 'kg' : 'dona';
+    existing.unit = normalizeUnit(unit);
     existing.active = true;
     await existing.save();
     emitToMarket(req.user.market, 'stock:changed', [
@@ -106,7 +107,7 @@ async function create(req, res) {
     price,
     costPrice,
     stock: stock || 0,
-    unit: unit === 'kg' ? 'kg' : 'dona',
+    unit: normalizeUnit(unit),
     active: true,
   });
   emitToMarket(req.user.market, 'stock:changed', [
@@ -142,7 +143,7 @@ async function update(req, res) {
       ...(price !== undefined && { price }),
       ...(costPrice !== undefined && { costPrice }),
       ...(stock !== undefined && { stock }),
-      ...(unit !== undefined && { unit: unit === 'kg' ? 'kg' : 'dona' }),
+      ...(unit !== undefined && { unit: normalizeUnit(unit) }),
       ...(active !== undefined && { active }),
     },
     { new: true, runValidators: true }
@@ -157,10 +158,10 @@ async function update(req, res) {
     ).catch((err) => console.error('Telegram notify error', err));
   }
   if (stock !== undefined && stock !== before.stock) {
-    const unitLabel = product.unit === 'kg' ? 'kg' : 'dona';
-    notifyOwners(req.user.market, `✏️ "${product.name}": qoldiq ${before.stock} → ${stock} ${unitLabel}`).catch(
-      (err) => console.error('Telegram notify error', err)
-    );
+    notifyOwners(
+      req.user.market,
+      `✏️ "${product.name}": qoldiq ${before.stock} → ${stock} ${unitLabel(product.unit)}`
+    ).catch((err) => console.error('Telegram notify error', err));
   }
 
   emitToMarket(req.user.market, 'stock:changed', [
@@ -206,7 +207,13 @@ async function bulkImport(req, res) {
     // unit on re-import — leave it untouched via $setOnInsert instead, so
     // only brand-new rows get the 'dona' default.
     const rawUnit = String(item.unit || '').trim().toLowerCase();
-    const unit = rawUnit ? (['kg', 'kilo', 'kilogramm'].includes(rawUnit) ? 'kg' : 'dona') : null;
+    const unit = rawUnit
+      ? ['kg', 'kilo', 'kilogramm'].includes(rawUnit)
+        ? 'kg'
+        : ['metr', 'm', 'metrlik'].includes(rawUnit)
+          ? 'metr'
+          : 'dona'
+      : null;
 
     if (!barcode || !name || Number.isNaN(price)) {
       errors.push({ row: index + 1, message: 'Shtrix-kod, nomi va toʻgʻri narx kerak' });

@@ -10,6 +10,7 @@ const Groq = require('groq-sdk');
 const { getOrCreateBriefing, runToolLoop } = require('../controllers/ai.controller');
 const { buildMarketingTools, executeMarketingTool, buildMarketingSystemPrompt } = require('./marketingAiTools');
 const { formatMoney } = require('../utils/formatMoney');
+const { unitLabel } = require('../utils/units');
 
 let bot = null;
 let botUsername = null;
@@ -195,7 +196,7 @@ async function handleTopProducts(chatId, marketId) {
     return;
   }
   const lines = rows.map(
-    (r, i) => `${i + 1}. ${r.name} — ${r.quantity} ${r.unit === 'kg' ? 'kg' : 'dona'}, ${formatMoney(r.revenue)}`
+    (r, i) => `${i + 1}. ${r.name} — ${r.quantity} ${unitLabel(r.unit)}, ${formatMoney(r.revenue)}`
   );
   await bot.sendMessage(chatId, `🔥 Bugungi top mahsulotlar:\n\n${lines.join('\n')}`, KEYBOARD);
 }
@@ -209,7 +210,7 @@ async function handleLowStock(chatId, marketId) {
     await bot.sendMessage(chatId, "Kam qolgan mahsulot yo'q. 👍", KEYBOARD);
     return;
   }
-  const lines = products.map((p) => `• ${p.name} — ${p.stock} ${p.unit === 'kg' ? 'kg' : 'dona'}`);
+  const lines = products.map((p) => `• ${p.name} — ${p.stock} ${unitLabel(p.unit)}`);
   await bot.sendMessage(chatId, `📦 Kam qolgan mahsulotlar:\n\n${lines.join('\n')}`, KEYBOARD);
 }
 
@@ -525,7 +526,6 @@ ${JSON.stringify(data)}`;
 
 function buildNightCashierMessage(data, aiText, marketName) {
   const paymentLabels = { cash: 'Naqd', card: 'Karta', online: 'Onlayn' };
-  const unitLabel = (u) => (u === 'kg' ? 'kg' : 'dona');
 
   const paymentLines = data.paymentBreakdown.length
     ? data.paymentBreakdown.map((p) => `• ${paymentLabels[p.method] || p.method}: ${formatMoney(p.total)} (${p.count} ta)`).join('\n')

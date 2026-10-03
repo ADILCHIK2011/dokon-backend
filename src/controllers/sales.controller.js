@@ -5,6 +5,7 @@ const Shift = require('../models/Shift');
 const { emitToMarket } = require('../socket');
 const { paginationParams } = require('../utils/pagination');
 const { notifyOwners } = require('../services/telegram');
+const { isFractionalUnit, unitLabel } = require('../utils/units');
 
 const PAYMENT_METHODS = ['cash', 'card', 'online'];
 
@@ -121,10 +122,11 @@ async function updateItems(req, res) {
       return res.status(404).json({ message: 'Mahsulot topilmadi' });
     }
 
-    // 'dona' items are always whole pieces; 'kg' items are sold by weight,
-    // so round to gram precision to avoid floating-point noise (e.g. 0.1+0.2)
-    // from the cashier UI's +/- stepper.
-    if (product.unit === 'kg') {
+    // 'dona' items are always whole pieces; fractional-unit items ('kg',
+    // 'metr') are sold by weight/length, so round to 1/1000 precision to
+    // avoid floating-point noise (e.g. 0.1+0.2) from the cashier UI's
+    // +/- stepper.
+    if (isFractionalUnit(product.unit)) {
       quantity = Math.round(quantity * 1000) / 1000;
     } else if (!Number.isInteger(quantity)) {
       return res.status(400).json({
@@ -135,9 +137,8 @@ async function updateItems(req, res) {
     if (quantity <= 0) continue;
 
     if (quantity > product.stock) {
-      const unitLabel = product.unit === 'kg' ? 'kg' : 'dona';
       return res.status(409).json({
-        message: `Omborda faqat ${product.stock} ${unitLabel} "${product.name}" bor`,
+        message: `Omborda faqat ${product.stock} ${unitLabel(product.unit)} "${product.name}" bor`,
         productId: product._id,
         available: product.stock,
       });

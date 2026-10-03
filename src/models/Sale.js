@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { UNIT_VALUES } = require('../utils/units');
 
 const saleItemSchema = new mongoose.Schema({
   product: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', required: true },
@@ -6,7 +7,7 @@ const saleItemSchema = new mongoose.Schema({
   name: { type: String, required: true },
   price: { type: Number, required: true },
   quantity: { type: Number, required: true },
-  unit: { type: String, enum: ['dona', 'kg'], default: 'dona' },
+  unit: { type: String, enum: UNIT_VALUES, default: 'dona' },
   lineTotal: { type: Number, required: true },
 }, { _id: false });
 
