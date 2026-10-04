@@ -4,8 +4,13 @@ const User = require('../models/User');
 const Product = require('../models/Product');
 const Sale = require('../models/Sale');
 const MarketNote = require('../models/MarketNote');
+const Shift = require('../models/Shift');
+const Briefing = require('../models/Briefing');
+const TelegramDailyLog = require('../models/TelegramDailyLog');
+const Debtor = require('../models/Debtor');
+const DebtPayment = require('../models/DebtPayment');
 const { paginationParams } = require('../utils/pagination');
-const { setMarketStatus } = require('../services/marketCache');
+const { setMarketStatus, clearMarketStatus } = require('../services/marketCache');
 
 function addMonths(date, months) {
   const d = new Date(date);
@@ -140,4 +145,33 @@ async function notes(req, res) {
   res.json({ notes, total, page, limit });
 }
 
-module.exports = { list, detail, create, renew, update, notes };
+// Hard delete — irreversible, unlike `update`'s `active: false`. Wipes the
+// market itself plus every document in every collection that carries a
+// `market` field (see CLAUDE.md's multi-tenancy note: that's the complete
+// set of per-tenant collections). clearMarketStatus() makes any still-valid
+// JWT for this market 403 on its very next request rather than continuing
+// to pass off a stale cache entry — see services/marketCache.js.
+async function remove(req, res) {
+  const market = await Market.findOne({ _id: req.params.id, ...ALOHIDA_FILTER });
+  if (!market) {
+    return res.status(404).json({ message: 'Doʻkon topilmadi' });
+  }
+
+  await Promise.all([
+    User.deleteMany({ market: market._id }),
+    Product.deleteMany({ market: market._id }),
+    Sale.deleteMany({ market: market._id }),
+    Shift.deleteMany({ market: market._id }),
+    Briefing.deleteMany({ market: market._id }),
+    MarketNote.deleteMany({ market: market._id }),
+    TelegramDailyLog.deleteMany({ market: market._id }),
+    Debtor.deleteMany({ market: market._id }),
+    DebtPayment.deleteMany({ market: market._id }),
+  ]);
+  await market.deleteOne();
+  clearMarketStatus(market._id);
+
+  res.json({ message: "Doʻkon butunlay oʻchirildi" });
+}
+
+module.exports = { list, detail, create, renew, update, notes, remove };

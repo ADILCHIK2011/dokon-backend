@@ -38,4 +38,11 @@ function setMarketStatus(market) {
   cache.set(market._id.toString(), toEntry(market));
 }
 
-module.exports = { getMarketStatus, setMarketStatus };
+// Called right after a superadmin hard-deletes a market, so a still-valid
+// JWT for that market 403s on its very next request instead of continuing
+// to pass for up to TTL_MS off a stale cached entry.
+function clearMarketStatus(marketId) {
+  cache.delete(marketId.toString());
+}
+
+module.exports = { getMarketStatus, setMarketStatus, clearMarketStatus };

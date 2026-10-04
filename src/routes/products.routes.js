@@ -1,6 +1,16 @@
 const express = require('express');
-const { verifyToken, requireRole, loadMarket, requirePermission } = require('../middleware/auth.middleware');
-const { list, searchQuick, getByBarcode, generateBarcode, create, update, remove, bulkImport } = require('../controllers/products.controller');
+const { verifyToken, requireRole, loadMarket, requirePermission, requirePlan } = require('../middleware/auth.middleware');
+const {
+  list,
+  searchQuick,
+  getByBarcode,
+  generateBarcode,
+  create,
+  update,
+  remove,
+  bulkImport,
+  voiceSearch,
+} = require('../controllers/products.controller');
 
 const router = express.Router();
 
@@ -13,6 +23,7 @@ router.get('/', requirePermission('overview', 'products'), list);
 // cashier permission set at all (see WorkersPage/App.jsx).
 router.get('/generate-barcode', requireRole('owner'), generateBarcode);
 router.get('/search', searchQuick);
+router.post('/voice-search', requirePlan('pro'), voiceSearch);
 router.get('/barcode/:barcode', getByBarcode);
 router.post('/', requirePermission('products'), create);
 router.post('/import', requirePermission('products'), bulkImport);

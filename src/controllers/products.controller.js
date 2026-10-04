@@ -1,8 +1,10 @@
+const { Groq, toFile } = require('groq-sdk');
 const Product = require('../models/Product');
 const { emitToMarket } = require('../socket');
 const { paginationParams } = require('../utils/pagination');
 const { escapeRegex } = require('../utils/escapeRegex');
 const { buildNameSearchFilter } = require('../utils/nameSearch');
+const { bestMatches } = require('../utils/fuzzyMatch');
 const { notifyOwners } = require('../services/telegram');
 const { formatMoney } = require('../utils/formatMoney');
 const { randomEan13 } = require('../utils/ean13');
@@ -250,4 +252,67 @@ async function bulkImport(req, res) {
   });
 }
 
-module.exports = { list, searchQuick, getByBarcode, generateBarcode, create, update, remove, bulkImport };
+// Pro-only (gated at the route) voice version of searchQuick: a cashier
+// speaks a product name instead of typing it. Two layers guard against a
+// mangled transcription actually naming the wrong product: (1) the
+// market's own catalog is fed to Whisper as a vocabulary hint via `prompt`,
+// a standard technique for steering transcription toward domain-specific
+// words it wouldn't otherwise guess correctly; (2) even a still-imperfect
+// transcript is fuzzy-matched (Levenshtein) against every active product
+// name, and only a clear, unambiguous winner is auto-picked — anything
+// uncertain comes back as a short list for the cashier to tap instead of
+// silently adding the wrong item to a real sale.
+async function voiceSearch(req, res) {
+  if (!process.env.GROQ_API_KEY) {
+    return res.status(503).json({ message: "AI yordamchi sozlanmagan. Administrator bilan bogʻlaning." });
+  }
+
+  const { audio, mimeType } = req.body || {};
+  if (!audio) {
+    return res.status(400).json({ message: 'Audio kerak' });
+  }
+
+  const products = await Product.find({ market: req.user.market, active: true }).select(
+    'name price barcode unit stock'
+  );
+  if (products.length === 0) {
+    return res.json({ transcript: '', autoPick: false, matches: [] });
+  }
+
+  const vocabulary = products
+    .map((p) => p.name)
+    .join(', ')
+    .slice(0, 800);
+
+  let transcript;
+  try {
+    const file = await toFile(Buffer.from(audio, 'base64'), 'voice.webm', { type: mimeType || 'audio/webm' });
+    const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+    const result = await groq.audio.transcriptions.create({
+      file,
+      model: 'whisper-large-v3-turbo',
+      language: 'uz',
+      prompt: vocabulary,
+    });
+    transcript = (result.text || '').trim();
+  } catch (err) {
+    console.error('Voice transcription error', err.message);
+    return res.status(502).json({ message: "Ovozni tanib boʻlmadi. Qayta urinib koʻring." });
+  }
+
+  if (!transcript) {
+    return res.json({ transcript: '', autoPick: false, matches: [] });
+  }
+
+  const ranked = bestMatches(transcript, products, { limit: 5 });
+  const [top, second] = ranked;
+  const autoPick = !!top && top.score >= 0.78 && (!second || top.score - second.score >= 0.12);
+
+  res.json({
+    transcript,
+    autoPick,
+    matches: ranked.filter((r) => r.score >= 0.35).map((r) => ({ product: r.item, score: r.score })),
+  });
+}
+
+module.exports = { list, searchQuick, getByBarcode, generateBarcode, create, update, remove, bulkImport, voiceSearch };
