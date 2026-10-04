@@ -2,12 +2,14 @@ const mongoose = require('mongoose');
 const Sale = require('../models/Sale');
 const Product = require('../models/Product');
 const Shift = require('../models/Shift');
+const Debtor = require('../models/Debtor');
+const User = require('../models/User');
 const { emitToMarket } = require('../socket');
 const { paginationParams } = require('../utils/pagination');
 const { notifyOwners } = require('../services/telegram');
 const { isFractionalUnit, unitLabel } = require('../utils/units');
 
-const PAYMENT_METHODS = ['cash', 'card', 'online'];
+const PAYMENT_METHODS = ['cash', 'card', 'online', 'nasiya'];
 
 async function saveWithConflictHandling(res, sale) {
   try {
@@ -53,7 +55,12 @@ async function listHistory(req, res) {
 
   const { page, limit, skip } = paginationParams(req.query, { defaultLimit: 20, maxLimit: 100 });
   const [sales, total] = await Promise.all([
-    Sale.find(query).sort({ completedAt: -1 }).skip(skip).limit(limit).populate('cashier', 'name'),
+    Sale.find(query)
+      .sort({ completedAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .populate('cashier', 'name')
+      .populate('debtor', 'name'),
     Sale.countDocuments(query),
   ]);
   res.json({ sales, total, page, limit });
@@ -161,7 +168,7 @@ async function updateItems(req, res) {
 }
 
 async function complete(req, res) {
-  const { paymentMethod } = req.body || {};
+  const { paymentMethod, debtorId } = req.body || {};
   if (!PAYMENT_METHODS.includes(paymentMethod)) {
     return res.status(400).json({ message: "To'lov turini tanlang" });
   }
@@ -171,6 +178,28 @@ async function complete(req, res) {
 
   if (sale.items.length === 0) {
     return res.status(400).json({ message: "Boʻsh savdoni yakunlab boʻlmaydi" });
+  }
+
+  // Nasiya is a Pro-only, per-cashier-permission feature (unlike the rest of
+  // this endpoint's payment methods, which every cashier can always use), so
+  // it's gated here rather than on the whole route — see requirePlan/
+  // requirePermission in auth.middleware.js for the same checks applied as
+  // route-level middleware on debtors.routes.js.
+  let debtor = null;
+  if (paymentMethod === 'nasiya') {
+    if (req.market.plan !== 'pro') {
+      return res.status(403).json({ message: 'Bu funksiya faqat Pro rejada mavjud' });
+    }
+    if (req.user.role === 'cashier') {
+      const cashier = await User.findById(req.user.id).select('permissions active');
+      if (!cashier || !cashier.active || !cashier.permissions.includes('nasiya')) {
+        return res.status(403).json({ message: 'Ruxsat yoʻq' });
+      }
+    }
+    debtor = await Debtor.findOne({ _id: debtorId, market: req.user.market, active: true });
+    if (!debtor) {
+      return res.status(404).json({ message: 'Nasiyachi topilmadi' });
+    }
   }
 
   const products = [];
@@ -198,7 +227,9 @@ async function complete(req, res) {
   sale.status = 'completed';
   sale.completedAt = new Date();
   sale.paymentMethod = paymentMethod;
+  if (debtor) sale.debtor = debtor._id;
   if (!(await saveWithConflictHandling(res, sale))) return;
+  if (debtor) await Debtor.updateOne({ _id: debtor._id }, { $inc: { balance: sale.total } });
   emitToMarket(req.user.market, 'stock:changed', stockDiffs);
 
   const outOfStock = stockDiffs.filter((d) => d.stock === 0);

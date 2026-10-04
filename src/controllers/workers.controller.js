@@ -8,7 +8,7 @@ const STARTER_WORKER_LIMIT = 3;
 // Dashboard pages a cashier can be granted access to (see requirePermission
 // in auth.middleware.js). Kassa itself is always open to every cashier and
 // has no key here.
-const PERMISSION_KEYS = ['overview', 'products', 'sales-history', 'analytics', 'dead-stock', 'ai'];
+const PERMISSION_KEYS = ['overview', 'products', 'sales-history', 'analytics', 'dead-stock', 'ai', 'nasiya'];
 
 function sanitizePermissions(permissions) {
   if (!Array.isArray(permissions)) return undefined;

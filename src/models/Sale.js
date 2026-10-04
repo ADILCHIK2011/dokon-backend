@@ -17,7 +17,10 @@ const saleSchema = new mongoose.Schema({
   items: { type: [saleItemSchema], default: [] },
   total: { type: Number, required: true, default: 0 },
   status: { type: String, enum: ['open', 'completed', 'cancelled'], default: 'open' },
-  paymentMethod: { type: String, enum: ['cash', 'card', 'online'], default: 'cash' },
+  paymentMethod: { type: String, enum: ['cash', 'card', 'online', 'nasiya'], default: 'cash' },
+  // Set only when paymentMethod === 'nasiya' — who the sale's total was
+  // credited to (see sales.controller.js's complete()).
+  debtor: { type: mongoose.Schema.Types.ObjectId, ref: 'Debtor' },
   createdAt: { type: Date, default: Date.now },
   completedAt: { type: Date },
   // Set when a cashier cancels an open ticket. Cancelling is a soft-delete

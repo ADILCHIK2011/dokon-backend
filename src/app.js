@@ -12,6 +12,7 @@ const analyticsRoutes = require('./routes/analytics.routes');
 const aiRoutes = require('./routes/ai.routes');
 const telegramRoutes = require('./routes/telegram.routes');
 const shiftsRoutes = require('./routes/shifts.routes');
+const debtorsRoutes = require('./routes/debtors.routes');
 
 const app = express();
 
@@ -60,6 +61,7 @@ app.use('/api/analytics', analyticsRoutes);
 app.use('/api/ai', aiRoutes);
 app.use('/api/telegram', telegramRoutes);
 app.use('/api/shifts', shiftsRoutes);
+app.use('/api/debtors', debtorsRoutes);
 
 app.use((req, res) => {
   res.status(404).json({ message: 'Sahifa topilmadi' });
