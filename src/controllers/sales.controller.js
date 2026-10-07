@@ -243,6 +243,81 @@ async function complete(req, res) {
   res.json({ sale });
 }
 
+async function returnItems(req, res) {
+  const sale = await Sale.findOne({ _id: req.params.id, market: req.user.market });
+  if (!sale) {
+    return res.status(404).json({ message: 'Savdo topilmadi' });
+  }
+  if (sale.status !== 'completed') {
+    return res.status(409).json({ message: 'Faqat yakunlangan savdoni qaytarish mumkin' });
+  }
+
+  const { items } = req.body || {};
+  if (!Array.isArray(items) || items.length === 0) {
+    return res.status(400).json({ message: "Qaytariladigan mahsulotlar kerak" });
+  }
+
+  let totalRefund = 0;
+  const stockDiffs = [];
+  for (const { itemIndex, quantity } of items) {
+    const line = sale.items[itemIndex];
+    if (!line) {
+      return res.status(400).json({ message: 'Mahsulot qatori topilmadi' });
+    }
+
+    let qty = Number(quantity);
+    if (isFractionalUnit(line.unit)) {
+      qty = Math.round(qty * 1000) / 1000;
+    } else if (!Number.isInteger(qty)) {
+      return res.status(400).json({
+        message: `"${line.name}" donalik mahsulot — qaytarish miqdori butun son bo'lishi kerak`,
+      });
+    }
+
+    const remaining = line.quantity - (line.returnedQuantity || 0);
+    if (!qty || qty <= 0 || qty > remaining) {
+      return res.status(400).json({ message: `"${line.name}" uchun qaytarish miqdori noto'g'ri` });
+    }
+
+    const refundAmount = qty * line.price;
+    line.returnedQuantity = (line.returnedQuantity || 0) + qty;
+    line.lineTotal -= refundAmount;
+    totalRefund += refundAmount;
+
+    const updatedProduct = await Product.findOneAndUpdate(
+      { _id: line.product, market: req.user.market },
+      { $inc: { stock: qty } },
+      { new: true }
+    );
+    if (updatedProduct) {
+      stockDiffs.push({
+        productId: updatedProduct._id,
+        stock: updatedProduct.stock,
+        name: updatedProduct.name,
+        barcode: updatedProduct.barcode,
+      });
+    }
+  }
+
+  sale.total -= totalRefund;
+  sale.returnedTotal = (sale.returnedTotal || 0) + totalRefund;
+  if (!(await saveWithConflictHandling(res, sale))) return;
+
+  if (sale.debtor) {
+    const debtor = await Debtor.findById(sale.debtor);
+    if (debtor) {
+      debtor.balance = Math.max(0, debtor.balance - totalRefund);
+      await debtor.save();
+    }
+  }
+
+  if (stockDiffs.length > 0) {
+    emitToMarket(req.user.market, 'stock:changed', stockDiffs);
+  }
+
+  res.json({ sale });
+}
+
 async function cancel(req, res) {
   const { error, message, sale } = await findOpenOwned(req);
   if (error) return res.status(error).json({ message });
@@ -254,4 +329,4 @@ async function cancel(req, res) {
   res.json({ message: 'Bekor qilindi' });
 }
 
-module.exports = { listMine, listHistory, create, getOne, updateItems, complete, cancel };
+module.exports = { listMine, listHistory, create, getOne, updateItems, complete, cancel, returnItems };

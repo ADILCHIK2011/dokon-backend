@@ -9,6 +9,13 @@ const saleItemSchema = new mongoose.Schema({
   quantity: { type: Number, required: true },
   unit: { type: String, enum: UNIT_VALUES, default: 'dona' },
   lineTotal: { type: Number, required: true },
+  // How much of `quantity` has been returned so far (see returnItems() in
+  // sales.controller.js). `quantity`/`lineTotal` stay at their original
+  // sold amounts; a return instead decrements `lineTotal` (and the parent
+  // sale's `total`) by the refunded amount so every existing revenue
+  // aggregation (analytics, AI tools, exports) reflects the return with no
+  // changes of its own — it just sums `total`/`lineTotal` as always.
+  returnedQuantity: { type: Number, default: 0 },
 }, { _id: false });
 
 const saleSchema = new mongoose.Schema({
@@ -16,6 +23,10 @@ const saleSchema = new mongoose.Schema({
   cashier: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   items: { type: [saleItemSchema], default: [] },
   total: { type: Number, required: true, default: 0 },
+  // Cumulative amount refunded across all returns on this sale. `total`
+  // above is net (original minus this) — original total is `total +
+  // returnedTotal` when needed for display.
+  returnedTotal: { type: Number, default: 0 },
   status: { type: String, enum: ['open', 'completed', 'cancelled'], default: 'open' },
   paymentMethod: { type: String, enum: ['cash', 'card', 'online', 'nasiya'], default: 'cash' },
   // Set only when paymentMethod === 'nasiya' — who the sale's total was

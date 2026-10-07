@@ -108,36 +108,80 @@ async function inventoryValue(req, res) {
   });
 }
 
+// ABC day-since-last-sold tiers (client-alohida's ABC tahlil page). Boundaries
+// don't overlap at 5/15 — a product sold exactly 5 days ago lands in A, not B.
+const ABC_BUCKETS = {
+  A: (daysSince) => daysSince !== null && daysSince >= 1 && daysSince <= 5,
+  B: (daysSince) => daysSince !== null && daysSince > 5 && daysSince <= 15,
+  C: (daysSince) => daysSince === null || daysSince > 15,
+};
+
 async function deadStock(req, res) {
-  const days = Number(req.query.days) || 30;
-  const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - days);
+  const { to, bucket } = req.query;
+  // Presence of `to`/`bucket` is what selects the new range+tier mode (used
+  // by client-alohida's ABC tahlil page); omitting both keeps the original
+  // `days`-threshold behavior so client/'s unmodified DeadStockPage keeps
+  // working against the same endpoint.
+  const useRange = to !== undefined || bucket !== undefined;
+
+  let referenceDate;
+  let days;
+  let cutoff;
+  if (useRange) {
+    referenceDate = to ? new Date(to) : new Date();
+  } else {
+    days = Number(req.query.days) || 30;
+    referenceDate = new Date();
+    cutoff = new Date(referenceDate);
+    cutoff.setDate(cutoff.getDate() - days);
+  }
 
   const lastSold = await Sale.aggregate([
-    { $match: { market: new mongoose.Types.ObjectId(req.user.market), status: 'completed' } },
+    {
+      $match: {
+        market: new mongoose.Types.ObjectId(req.user.market),
+        status: 'completed',
+        // Only bounded by the selected period's end (`to`), never its start —
+        // a product's true "days since last sold" has to look as far back as
+        // it takes, otherwise a short period could never surface a genuinely
+        // dead (tier C) product. The period's start is purely a UI affordance
+        // borrowed from the Tahlillar page's picker, not a query filter here.
+        ...(useRange ? { completedAt: { $lte: referenceDate } } : {}),
+      },
+    },
     { $unwind: '$items' },
     { $group: { _id: '$items.product', lastSoldAt: { $max: '$completedAt' } } },
   ]);
   const lastSoldMap = new Map(lastSold.map((r) => [r._id.toString(), r.lastSoldAt]));
 
   const products = await Product.find({ market: req.user.market, active: true, stock: { $gt: 0 } });
-  const allRows = products
-    .map((p) => ({
+  let allRows = products.map((p) => {
+    const lastSoldAt = lastSoldMap.get(p._id.toString()) || null;
+    const daysSince = lastSoldAt ? Math.floor((referenceDate - lastSoldAt) / (1000 * 60 * 60 * 24)) : null;
+    return {
       _id: p._id,
       name: p.name,
       barcode: p.barcode,
       stock: p.stock,
       unit: p.unit,
       price: p.price,
-      lastSoldAt: lastSoldMap.get(p._id.toString()) || null,
-    }))
-    .filter((p) => !p.lastSoldAt || p.lastSoldAt < cutoff)
-    .sort((a, b) => (a.lastSoldAt || 0) - (b.lastSoldAt || 0));
+      lastSoldAt,
+      daysSince,
+    };
+  });
+
+  if (useRange) {
+    const matchesBucket = ABC_BUCKETS[bucket];
+    allRows = allRows.filter((p) => (matchesBucket ? matchesBucket(p.daysSince) : p.daysSince === null || p.daysSince >= 1));
+  } else {
+    allRows = allRows.filter((p) => !p.lastSoldAt || p.lastSoldAt < cutoff);
+  }
+  allRows.sort((a, b) => (a.lastSoldAt?.getTime() || 0) - (b.lastSoldAt?.getTime() || 0));
 
   const { page, limit, skip } = paginationParams(req.query, { defaultLimit: 20, maxLimit: 100 });
   const rows = allRows.slice(skip, skip + limit);
 
-  res.json({ products: rows, total: allRows.length, page, limit, days });
+  res.json({ products: rows, total: allRows.length, page, limit, ...(useRange ? { to: referenceDate, bucket: bucket || null } : { days }) });
 }
 
 module.exports = { summary, topProducts, daily, deadStock, inventoryValue };

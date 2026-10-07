@@ -88,4 +88,17 @@ async function recordPayment(req, res) {
   res.status(201).json({ debtor, payment });
 }
 
-module.exports = { list, create, update, getOne, recordPayment };
+async function remove(req, res) {
+  const debtor = await Debtor.findOne({ _id: req.params.id, market: req.user.market });
+  if (!debtor) {
+    return res.status(404).json({ message: 'Nasiyachi topilmadi' });
+  }
+  if (debtor.balance > 0) {
+    return res.status(409).json({ message: "Qarzi tugamagan nasiyachini o'chirib bo'lmaydi" });
+  }
+  debtor.active = false;
+  await debtor.save();
+  res.json({ debtor });
+}
+
+module.exports = { list, create, update, getOne, recordPayment, remove };

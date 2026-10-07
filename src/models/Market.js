@@ -16,6 +16,11 @@ const marketSchema = new mongoose.Schema({
   // future, so every existing plan/expiry check (login, loadMarket, telegram)
   // just naturally passes without any special-casing.
   alohida: { type: Boolean, default: false },
+  // Sequential counter backing products.controller.js's generateBarcode() —
+  // each call atomically increments this and formats the new value as the
+  // barcode, so generated codes are 1, 2, 3... per market rather than
+  // random, and can never collide with an earlier generated code.
+  barcodeSeq: { type: Number, default: 0 },
   createdAt: { type: Date, default: Date.now },
 });
 

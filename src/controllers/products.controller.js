@@ -1,5 +1,6 @@
 const { Groq, toFile } = require('groq-sdk');
 const Product = require('../models/Product');
+const Market = require('../models/Market');
 const { emitToMarket } = require('../socket');
 const { paginationParams } = require('../utils/pagination');
 const { escapeRegex } = require('../utils/escapeRegex');
@@ -7,7 +8,6 @@ const { buildNameSearchFilter } = require('../utils/nameSearch');
 const { bestMatches } = require('../utils/fuzzyMatch');
 const { notifyOwners } = require('../services/telegram');
 const { formatMoney } = require('../utils/formatMoney');
-const { randomEan13 } = require('../utils/ean13');
 const { normalizeUnit, unitLabel } = require('../utils/units');
 
 async function list(req, res) {
@@ -51,9 +51,9 @@ async function searchQuick(req, res) {
 
 async function getByBarcode(req, res) {
   const product = await Product.findOne({
-    barcode: req.params.barcode,
     market: req.user.market,
     active: true,
+    $or: [{ barcode: req.params.barcode }, { extraBarcodes: req.params.barcode }],
   });
   if (!product) {
     return res.status(404).json({ message: 'Mahsulot topilmadi' });
@@ -62,27 +62,62 @@ async function getByBarcode(req, res) {
 }
 
 async function generateBarcode(req, res) {
-  for (let attempt = 0; attempt < 10; attempt++) {
-    const barcode = randomEan13();
-    const exists = await Product.findOne({ barcode, market: req.user.market });
-    if (!exists) {
-      return res.json({ barcode });
-    }
+  // Sequential (1, 2, 3...) rather than random: a random code can — and,
+  // per a past incident, did — eventually repeat and collide with an
+  // unrelated product added later. An atomic per-market counter can never
+  // produce the same code twice, no uniqueness check needed.
+  const market = await Market.findByIdAndUpdate(
+    req.user.market,
+    { $inc: { barcodeSeq: 1 } },
+    { new: true }
+  );
+  const barcode = String(market.barcodeSeq).padStart(7, '0');
+  res.json({ barcode });
+}
+
+// Trims/dedupes a submitted extra-barcode list and drops anything that's
+// blank or equal to the product's own primary barcode (that'd be a
+// pointless duplicate lookup key for the same code).
+function sanitizeExtraBarcodes(list, primaryBarcode) {
+  if (!Array.isArray(list)) return [];
+  const seen = new Set();
+  const result = [];
+  for (const raw of list) {
+    const code = String(raw ?? '').trim();
+    if (!code || code === primaryBarcode || seen.has(code)) continue;
+    seen.add(code);
+    result.push(code);
   }
-  res.status(500).json({ message: "Noyob shtrix-kod yaratib bo'lmadi. Qayta urinib ko'ring." });
+  return result;
 }
 
 async function create(req, res) {
-  const { barcode, name, price, costPrice, stock, unit } = req.body;
+  const { barcode, extraBarcodes, name, price, costPrice, stock, unit } = req.body;
   if (!barcode || !name || price === undefined) {
     return res.status(400).json({ message: 'Shtrix-kod, nomi va narxi kerak' });
   }
 
+  const extras = sanitizeExtraBarcodes(extraBarcodes, barcode);
+  const allCodes = [barcode, ...extras];
+
+  // Catches collisions against ANY other active product's primary barcode OR
+  // extra barcodes — the model's unique indexes only cover same-field
+  // collisions (barcode-vs-barcode via its own index, extraBarcodes-vs-
+  // extraBarcodes via its multikey index), not a code submitted here as an
+  // extra matching another product's primary field or vice versa.
+  const conflict = await Product.findOne({
+    market: req.user.market,
+    active: true,
+    $or: [{ barcode: { $in: allCodes } }, { extraBarcodes: { $in: allCodes } }],
+  });
+  if (conflict) {
+    return res.status(409).json({ message: 'Bu shtrix-kod allaqachon mavjud' });
+  }
+
   const existing = await Product.findOne({ barcode, market: req.user.market });
   if (existing) {
-    if (existing.active) {
-      return res.status(409).json({ message: 'Bu shtrix-kod allaqachon mavjud' });
-    }
+    // Only reachable when `existing` is inactive — an active match on the
+    // primary barcode would already have been caught by `conflict` above.
     // Same barcode belongs to a previously deleted product (remove() below
     // only soft-deletes — active: false — so the barcode+market unique index
     // still holds it). Revive that record with the new details instead of
@@ -94,6 +129,7 @@ async function create(req, res) {
     existing.costPrice = costPrice;
     existing.stock = stock || 0;
     existing.unit = normalizeUnit(unit);
+    existing.extraBarcodes = extras;
     existing.active = true;
     await existing.save();
     emitToMarket(req.user.market, 'stock:changed', [
@@ -105,6 +141,7 @@ async function create(req, res) {
   const product = await Product.create({
     market: req.user.market,
     barcode,
+    extraBarcodes: extras,
     name,
     price,
     costPrice,
@@ -119,28 +156,40 @@ async function create(req, res) {
 }
 
 async function update(req, res) {
-  const { barcode, name, price, costPrice, stock, active, unit } = req.body;
-
-  if (barcode !== undefined) {
-    const existing = await Product.findOne({
-      barcode,
-      market: req.user.market,
-      _id: { $ne: req.params.id },
-    });
-    if (existing) {
-      return res.status(409).json({ message: 'Bu shtrix-kod allaqachon mavjud' });
-    }
-  }
+  const { barcode, extraBarcodes, name, price, costPrice, stock, active, unit } = req.body;
 
   const before = await Product.findOne({ _id: req.params.id, market: req.user.market });
   if (!before) {
     return res.status(404).json({ message: 'Mahsulot topilmadi' });
   }
 
+  // Only re-validate uniqueness when the barcode set is actually changing —
+  // same reasoning as create()'s `conflict` check, but excluding this
+  // product itself from the collision search.
+  let extras;
+  if (barcode !== undefined || extraBarcodes !== undefined) {
+    const effectiveBarcode = barcode !== undefined ? barcode : before.barcode;
+    extras = sanitizeExtraBarcodes(
+      extraBarcodes !== undefined ? extraBarcodes : before.extraBarcodes,
+      effectiveBarcode
+    );
+    const allCodes = [effectiveBarcode, ...extras];
+    const conflict = await Product.findOne({
+      market: req.user.market,
+      active: true,
+      _id: { $ne: req.params.id },
+      $or: [{ barcode: { $in: allCodes } }, { extraBarcodes: { $in: allCodes } }],
+    });
+    if (conflict) {
+      return res.status(409).json({ message: 'Bu shtrix-kod allaqachon mavjud' });
+    }
+  }
+
   const product = await Product.findOneAndUpdate(
     { _id: req.params.id, market: req.user.market },
     {
       ...(barcode !== undefined && { barcode }),
+      ...(extras !== undefined && { extraBarcodes: extras }),
       ...(name !== undefined && { name }),
       ...(price !== undefined && { price }),
       ...(costPrice !== undefined && { costPrice }),
