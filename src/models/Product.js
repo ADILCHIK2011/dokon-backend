@@ -18,7 +18,14 @@ const productSchema = new mongoose.Schema({
   // the common "no extra barcodes" case. products.controller.js's create/
   // update/revive paths all omit (or $unset) this key rather than ever
   // writing `[]`.
-  extraBarcodes: { type: [String] },
+  // `default: undefined` overrides Mongoose's built-in behavior of defaulting
+  // every Array-typed path to `[]` on document construction — without it,
+  // *any* new/upserted product (including via bulkWrite upserts, which also
+  // hydrate schema defaults) silently got `extraBarcodes: []`, and a second
+  // such product in the same market then collided on the index below
+  // (confirmed by hand, 2026-10-08: a disposable bulkWrite upsert of two
+  // brand-new products reproduced this exact E11000 on the second insert).
+  extraBarcodes: { type: [String], default: undefined },
   name: { type: String, required: true },
   price: { type: Number, required: true },
   costPrice: { type: Number },
