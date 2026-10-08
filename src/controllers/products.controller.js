@@ -78,8 +78,9 @@ async function generateBarcode(req, res) {
     { new: true }
   );
   // barcodeSeq is post-increment (1 on the first ever call), so subtract 1
-  // to make the first generated code exactly the base value.
-  const barcode = String(GENERATED_BARCODE_BASE + market.barcodeSeq - 1).padStart(13, '0');
+  // to make the first generated code exactly the base value. No fixed-width
+  // padding — the digit count is whatever this number naturally is.
+  const barcode = String(GENERATED_BARCODE_BASE + market.barcodeSeq - 1);
   res.json({ barcode });
 }
 
