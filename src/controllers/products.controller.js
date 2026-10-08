@@ -61,17 +61,25 @@ async function getByBarcode(req, res) {
   res.json({ product });
 }
 
+// 4000000000000 is the start of the GS1 "restricted circulation" EAN-13
+// range (prefixes 200-299, here using 400...) reserved for internal/in-store
+// use — real manufacturer barcodes never fall in this range, so generated
+// codes can never collide with a scanned product's actual barcode.
+const GENERATED_BARCODE_BASE = 4000000000000;
+
 async function generateBarcode(req, res) {
-  // Sequential (1, 2, 3...) rather than random: a random code can — and,
-  // per a past incident, did — eventually repeat and collide with an
-  // unrelated product added later. An atomic per-market counter can never
-  // produce the same code twice, no uniqueness check needed.
+  // Sequential (base, base+1, base+2...) rather than random: a random code
+  // can — and, per a past incident, did — eventually repeat and collide
+  // with an unrelated product added later. An atomic per-market counter can
+  // never produce the same code twice, no uniqueness check needed.
   const market = await Market.findByIdAndUpdate(
     req.user.market,
     { $inc: { barcodeSeq: 1 } },
     { new: true }
   );
-  const barcode = String(market.barcodeSeq).padStart(7, '0');
+  // barcodeSeq is post-increment (1 on the first ever call), so subtract 1
+  // to make the first generated code exactly the base value.
+  const barcode = String(GENERATED_BARCODE_BASE + market.barcodeSeq - 1).padStart(13, '0');
   res.json({ barcode });
 }
 
@@ -118,18 +126,17 @@ async function create(req, res) {
   if (existing) {
     // Only reachable when `existing` is inactive — an active match on the
     // primary barcode would already have been caught by `conflict` above.
-    // Same barcode belongs to a previously deleted product (remove() below
-    // only soft-deletes — active: false — so the barcode+market unique index
-    // still holds it). Revive that record with the new details instead of
-    // blocking: otherwise re-adding a deleted product's barcode is stuck
-    // forever, since the "existing" copy is invisible everywhere else
-    // (list()/getByBarcode() both filter active: true).
+    // remove() now hard-deletes, so this only still matches products that
+    // were soft-deleted (active: false) before that change shipped; revive
+    // that leftover record with the new details instead of blocking.
     existing.name = name;
     existing.price = price;
     existing.costPrice = costPrice;
     existing.stock = stock || 0;
     existing.unit = normalizeUnit(unit);
-    existing.extraBarcodes = extras;
+    // Never leave this as `[]` — must stay truly absent so the partial
+    // unique index on { market, extraBarcodes } excludes it (see Product.js).
+    existing.extraBarcodes = extras.length > 0 ? extras : undefined;
     existing.active = true;
     await existing.save();
     emitToMarket(req.user.market, 'stock:changed', [
@@ -141,7 +148,8 @@ async function create(req, res) {
   const product = await Product.create({
     market: req.user.market,
     barcode,
-    extraBarcodes: extras,
+    // Omitted entirely (not `[]`) when there are no extras — see Product.js.
+    ...(extras.length > 0 && { extraBarcodes: extras }),
     name,
     price,
     costPrice,
@@ -188,14 +196,19 @@ async function update(req, res) {
   const product = await Product.findOneAndUpdate(
     { _id: req.params.id, market: req.user.market },
     {
-      ...(barcode !== undefined && { barcode }),
-      ...(extras !== undefined && { extraBarcodes: extras }),
-      ...(name !== undefined && { name }),
-      ...(price !== undefined && { price }),
-      ...(costPrice !== undefined && { costPrice }),
-      ...(stock !== undefined && { stock }),
-      ...(unit !== undefined && { unit: normalizeUnit(unit) }),
-      ...(active !== undefined && { active }),
+      $set: {
+        ...(barcode !== undefined && { barcode }),
+        // Only $set when non-empty — an empty array must stay truly absent
+        // from the document, see Product.js's extraBarcodes index comment.
+        ...(extras !== undefined && extras.length > 0 && { extraBarcodes: extras }),
+        ...(name !== undefined && { name }),
+        ...(price !== undefined && { price }),
+        ...(costPrice !== undefined && { costPrice }),
+        ...(stock !== undefined && { stock }),
+        ...(unit !== undefined && { unit: normalizeUnit(unit) }),
+        ...(active !== undefined && { active }),
+      },
+      ...(extras !== undefined && extras.length === 0 && { $unset: { extraBarcodes: '' } }),
     },
     { new: true, runValidators: true }
   );
@@ -222,11 +235,7 @@ async function update(req, res) {
 }
 
 async function remove(req, res) {
-  const product = await Product.findOneAndUpdate(
-    { _id: req.params.id, market: req.user.market },
-    { active: false },
-    { new: true }
-  );
+  const product = await Product.findOneAndDelete({ _id: req.params.id, market: req.user.market });
   if (!product) {
     return res.status(404).json({ message: 'Mahsulot topilmadi' });
   }

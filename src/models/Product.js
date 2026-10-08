@@ -12,7 +12,13 @@ const productSchema = new mongoose.Schema({
   // products.controller.js's getByBarcode and the uniqueness checks in
   // create/update, which treat every value here as equally claimable as the
   // primary `barcode` field.
-  extraBarcodes: { type: [String], default: [] },
+  // No `default: []` — deliberately left unset when a product has no extra
+  // barcodes. See the partialFilterExpression note below for why: the index
+  // needs this field truly absent, not present-as-empty-array, to exclude
+  // the common "no extra barcodes" case. products.controller.js's create/
+  // update/revive paths all omit (or $unset) this key rather than ever
+  // writing `[]`.
+  extraBarcodes: { type: [String] },
   name: { type: String, required: true },
   price: { type: Number, required: true },
   costPrice: { type: Number },
@@ -32,20 +38,24 @@ productSchema.index({ barcode: 1, market: 1 }, { unique: true });
 // *primary* `barcode` field (different field, different index) — that cross-
 // field case is checked in the application layer, see products.controller.js.
 //
-// partialFilterExpression is required here, not optional: every product that
-// existed before this field was added has no `extraBarcodes` key at all, and
-// a plain unique index treats "field entirely missing" as an indexed `null`
-// — every pre-existing product in the same market collides on that same
-// `null` entry and the index build fails outright. `sparse: true` does NOT
-// fix this for a compound index: sparse only excludes a document when it's
-// missing *every* indexed field, and `market` is always present, so sparse
-// alone still produced the exact same E11000 (confirmed by hand against this
-// collection). A partial filter expression is the only thing that actually
-// excludes "missing extraBarcodes" documents from this index; a present-but-
-// empty `[]` (every product saved through create()/update() going forward)
-// already contributes zero multikey entries on its own regardless, so this
-// doesn't weaken the uniqueness guarantee for any document that actually has
-// extra barcodes.
+// partialFilterExpression excludes any product with no extra barcodes from
+// this index — required, not optional. `sparse: true` does NOT do this for a
+// compound index: sparse only excludes a document missing *every* indexed
+// field, and `market` is always present, so sparse alone still produced an
+// E11000 (confirmed by hand against this collection).
+//
+// `$exists: true` relies entirely on the application NEVER writing
+// `extraBarcodes: []` — only omitting/$unset-ing the key, or setting it to a
+// genuinely non-empty array. An empty array would still satisfy `$exists:
+// true` (the key is present, just empty) and MongoDB indexes an empty array
+// as a single entry with key value `undefined` (documented multikey
+// behavior) — so two products in the same market both left with `[]` would
+// collide on that shared `undefined` entry. `$ne: []` would be the more
+// obviously-correct filter, but MongoDB's partialFilterExpression validator
+// rejects `$ne` outright ("Expression not supported in partial index: $not")
+// — confirmed by hand, 2026-10-08, against this exact index. Hence the
+// never-write-`[]` discipline in products.controller.js's create/update/
+// revive paths instead.
 productSchema.index(
   { market: 1, extraBarcodes: 1 },
   { unique: true, partialFilterExpression: { extraBarcodes: { $exists: true } } }
