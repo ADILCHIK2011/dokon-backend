@@ -63,6 +63,36 @@ async function login(req, res) {
   res.json({ token, user: publicUser(user, market) });
 }
 
+// client-alohida login: password only, no market code or username. Each
+// alohida deployment serves a small, fixed set of users, so instead of
+// asking for a market/username we scan active users across alohida markets
+// and bcrypt.compare the password against each until one matches.
+async function alohidaLogin(req, res) {
+  const { password } = req.body;
+  if (!password) {
+    return res.status(400).json({ message: 'Parol kerak' });
+  }
+
+  const markets = await Market.find({ alohida: true, active: true });
+  const validMarketIds = markets
+    .filter((market) => market.subscriptionExpiresAt > new Date())
+    .map((market) => market._id);
+  if (validMarketIds.length === 0) {
+    return res.status(401).json({ message: 'Parol notoʻgʻri' });
+  }
+
+  const users = await User.find({ market: { $in: validMarketIds }, active: true });
+  for (const user of users) {
+    if (await bcrypt.compare(password, user.passwordHash)) {
+      const market = markets.find((m) => m._id.equals(user.market));
+      const token = signToken(user);
+      return res.json({ token, user: publicUser(user, market) });
+    }
+  }
+
+  res.status(401).json({ message: 'Parol notoʻgʻri' });
+}
+
 // Superadmin login: no market involved.
 async function adminLogin(req, res) {
   const { username, password } = req.body;
@@ -114,4 +144,4 @@ async function changePassword(req, res) {
   res.json({ message: 'Parol yangilandi' });
 }
 
-module.exports = { login, adminLogin, me, changePassword };
+module.exports = { login, alohidaLogin, adminLogin, me, changePassword };
