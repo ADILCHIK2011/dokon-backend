@@ -3,6 +3,7 @@ const Sale = require('../models/Sale');
 const Shift = require('../models/Shift');
 const User = require('../models/User');
 const { buildNameSearchFilter } = require('../utils/nameSearch');
+const { revenueTotals, shiftRevenueMap } = require('../utils/revenue');
 
 // OpenAI-compatible function-calling schemas (Groq uses the same shape).
 // Every executor below takes the caller's market id explicitly — the model
@@ -145,15 +146,10 @@ function dateRangeMatch(args) {
 }
 
 // Shared by get_sales_summary and compare_sales_periods so the two periods
-// in a comparison are computed with identical logic.
+// in a comparison are computed with identical logic. Revenue follows
+// utils/revenue.js: nasiya sales count only once the debt is repaid.
 async function salesSummaryForRange(marketId, range) {
-  const match = { market: marketId, status: 'completed', completedAt: range };
-  const [result] = await Sale.aggregate([
-    { $match: match },
-    { $group: { _id: null, totalRevenue: { $sum: '$total' }, totalTransactions: { $sum: 1 } } },
-  ]);
-  const totalRevenue = result?.totalRevenue || 0;
-  const totalTransactions = result?.totalTransactions || 0;
+  const { totalRevenue, totalTransactions } = await revenueTotals(marketId, range);
   return {
     totalRevenue,
     totalTransactions,
@@ -307,26 +303,11 @@ async function executeTool(name, args, marketId) {
       const users = await User.find({ _id: { $in: cashierIds } }).select('name');
       const nameById = new Map(users.map((u) => [u._id.toString(), u.name]));
 
-      // Pull every completed sale spanning all the shifts once, then bucket
-      // it into shifts in memory — cheaper than one aggregate per shift.
-      const earliestStart = shifts.reduce((min, s) => (s.startedAt < min ? s.startedAt : min), shifts[0].startedAt);
-      const sales = await Sale.find({
-        market: marketId,
-        status: 'completed',
-        cashier: { $in: cashierIds },
-        completedAt: { $gte: earliestStart },
-      }).select('cashier total completedAt');
+      const revenueByShift = await shiftRevenueMap(shifts, marketId);
 
       const byCashier = new Map();
       for (const shift of shifts) {
-        const end = shift.endedAt || new Date();
-        const shiftSales = sales.filter(
-          (s) =>
-            s.cashier.toString() === shift.cashier.toString() &&
-            s.completedAt >= shift.startedAt &&
-            s.completedAt <= end
-        );
-        const revenue = shiftSales.reduce((sum, s) => sum + s.total, 0);
+        const { revenue = 0, transactions = 0 } = revenueByShift.get(shift._id.toString()) || {};
         const cashierName = nameById.get(shift.cashier.toString()) || "Noma'lum";
 
         const agg = byCashier.get(shift.cashier.toString()) || {
@@ -337,14 +318,14 @@ async function executeTool(name, args, marketId) {
           shifts: [],
         };
         agg.totalRevenue += revenue;
-        agg.totalTransactions += shiftSales.length;
+        agg.totalTransactions += transactions;
         agg.shiftsCount += 1;
         agg.shifts.push({
           startedAt: shift.startedAt.toISOString(),
           endedAt: shift.endedAt ? shift.endedAt.toISOString() : null,
           status: shift.status,
           revenue,
-          transactions: shiftSales.length,
+          transactions,
         });
         byCashier.set(shift.cashier.toString(), agg);
       }

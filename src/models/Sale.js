@@ -6,6 +6,11 @@ const saleItemSchema = new mongoose.Schema({
   barcode: { type: String, required: true },
   name: { type: String, required: true },
   price: { type: Number, required: true },
+  // Set only when a cashier discounted this line below the product's catalog
+  // price at checkout (see updateItems() in sales.controller.js) — lets sale
+  // history show "Chegirma qilingan -> {price} so'm" instead of just the
+  // charged price.
+  originalPrice: { type: Number },
   quantity: { type: Number, required: true },
   unit: { type: String, enum: UNIT_VALUES, default: 'dona' },
   lineTotal: { type: Number, required: true },
@@ -28,7 +33,18 @@ const saleSchema = new mongoose.Schema({
   // returnedTotal` when needed for display.
   returnedTotal: { type: Number, default: 0 },
   status: { type: String, enum: ['open', 'completed', 'cancelled'], default: 'open' },
-  paymentMethod: { type: String, enum: ['cash', 'card', 'online', 'nasiya'], default: 'cash' },
+  paymentMethod: { type: String, enum: ['cash', 'card', 'online', 'nasiya', 'mixed'], default: 'cash' },
+  // Set only when paymentMethod === 'mixed' — how `total` was split across
+  // cash/card/online (see complete() in sales.controller.js, which requires
+  // these amounts to sum to exactly `total`).
+  paymentBreakdown: {
+    type: [{
+      method: { type: String, enum: ['cash', 'card', 'online'], required: true },
+      amount: { type: Number, required: true },
+      _id: false,
+    }],
+    default: undefined,
+  },
   // Set only when paymentMethod === 'nasiya' — who the sale's total was
   // credited to (see sales.controller.js's complete()).
   debtor: { type: mongoose.Schema.Types.ObjectId, ref: 'Debtor' },

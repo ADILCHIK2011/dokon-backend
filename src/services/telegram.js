@@ -5,6 +5,7 @@ const User = require('../models/User');
 const Market = require('../models/Market');
 const Product = require('../models/Product');
 const Sale = require('../models/Sale');
+const DebtPayment = require('../models/DebtPayment');
 const TelegramDailyLog = require('../models/TelegramDailyLog');
 const Groq = require('groq-sdk');
 const { getOrCreateBriefing, runToolLoop } = require('../controllers/ai.controller');
@@ -12,8 +13,15 @@ const { buildMarketingTools, executeMarketingTool, buildMarketingSystemPrompt } 
 const { formatMoney } = require('../utils/formatMoney');
 const { unitLabel } = require('../utils/units');
 const { buildXlsxBuffer } = require('../utils/xlsxBuffer');
+const { revenueTotals } = require('../utils/revenue');
 
-const PAYMENT_LABELS_UZ = { cash: 'Naqd', card: 'Karta', online: 'Onlayn' };
+const PAYMENT_LABELS_UZ = {
+  cash: 'Naqd',
+  card: 'Karta',
+  online: 'Onlayn',
+  nasiya: 'Nasiya (qarzga berildi)',
+  debt_payment: "Nasiya qarz to'lovi",
+};
 
 let bot = null;
 let botUsername = null;
@@ -431,15 +439,18 @@ async function collectNightCashierReportData(marketId) {
   const { start, end } = tashkentDayRangeUTC(1);
   const completedMatch = { market: marketId, status: 'completed', completedAt: { $gte: start, $lte: end } };
 
-  const [summary, paymentRows, topProductRows, cancelledCount, staleOpenCount, lowStock, outOfStock, unsellableCount] =
+  const [summary, paymentRows, debtPaymentRows, topProductRows, cancelledCount, staleOpenCount, lowStock, outOfStock, unsellableCount] =
     await Promise.all([
-      Sale.aggregate([
-        { $match: completedMatch },
-        { $group: { _id: null, totalRevenue: { $sum: '$total' }, totalTransactions: { $sum: 1 } } },
-      ]),
+      revenueTotals(marketId, { $gte: start, $lte: end }),
       Sale.aggregate([
         { $match: completedMatch },
         { $group: { _id: '$paymentMethod', total: { $sum: '$total' }, count: { $sum: 1 } } },
+      ]),
+      // Debt repayments are the money a nasiya sale eventually brings in, so
+      // they belong in the breakdown alongside the sale payment methods.
+      DebtPayment.aggregate([
+        { $match: { market: marketId, createdAt: { $gte: start, $lte: end } } },
+        { $group: { _id: null, total: { $sum: '$amount' }, count: { $sum: 1 } } },
       ]),
       Sale.aggregate([
         { $match: completedMatch },
@@ -468,9 +479,14 @@ async function collectNightCashierReportData(marketId) {
 
   return {
     dateLabel: formatDateUz(start),
-    totalRevenue: summary[0]?.totalRevenue || 0,
-    totalTransactions: summary[0]?.totalTransactions || 0,
-    paymentBreakdown: paymentRows.map((r) => ({ method: r._id, total: r.total, count: r.count })),
+    totalRevenue: summary.totalRevenue,
+    totalTransactions: summary.totalTransactions,
+    paymentBreakdown: [
+      ...paymentRows.map((r) => ({ method: r._id, total: r.total, count: r.count })),
+      ...(debtPaymentRows[0]
+        ? [{ method: 'debt_payment', total: debtPaymentRows[0].total, count: debtPaymentRows[0].count }]
+        : []),
+    ],
     topProducts: topProductRows.map((r) => ({ name: r.name, unit: r.unit || 'dona', quantity: r.quantity, revenue: r.revenue })),
     cancelledCount,
     staleOpenCount,

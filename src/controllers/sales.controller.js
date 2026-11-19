@@ -9,7 +9,8 @@ const { paginationParams } = require('../utils/pagination');
 const { notifyOwners } = require('../services/telegram');
 const { isFractionalUnit, unitLabel } = require('../utils/units');
 
-const PAYMENT_METHODS = ['cash', 'card', 'online', 'nasiya'];
+const PAYMENT_METHODS = ['cash', 'card', 'online', 'nasiya', 'mixed'];
+const MIXED_SUB_METHODS = ['cash', 'card', 'online'];
 
 async function saveWithConflictHandling(res, sale) {
   try {
@@ -112,13 +113,13 @@ async function updateItems(req, res) {
   const { error, message, sale } = await findOpenOwned(req);
   if (error) return res.status(error).json({ message });
 
-  const { items } = req.body; // [{ productId, quantity }]
+  const { items } = req.body; // [{ productId, quantity, price }]
   if (!Array.isArray(items)) {
     return res.status(400).json({ message: "Mahsulotlar roʻyxati kerak" });
   }
 
   const resolvedItems = [];
-  for (let { productId, quantity } of items) {
+  for (let { productId, quantity, price } of items) {
     if (!quantity || quantity <= 0) continue;
     const product = await Product.findOne({
       _id: productId,
@@ -150,14 +151,37 @@ async function updateItems(req, res) {
         available: product.stock,
       });
     }
+    // Cashier-entered discount price (see client-alohida's CashierPage).
+    // Only ever a markdown — a line can't be charged more than the catalog
+    // price — and equal-to-catalog is treated as "no discount" so a line
+    // never carries a pointless originalPrice.
+    let linePrice = product.price;
+    let originalPrice;
+    if (price !== undefined && price !== null && price !== '') {
+      const customPrice = Number(price);
+      if (!Number.isFinite(customPrice) || customPrice <= 0) {
+        return res.status(400).json({ message: `"${product.name}" uchun narx noto'g'ri` });
+      }
+      if (customPrice > product.price) {
+        return res.status(400).json({
+          message: `"${product.name}" uchun narxni asl narxdan oshirib bo'lmaydi`,
+        });
+      }
+      if (customPrice !== product.price) {
+        linePrice = customPrice;
+        originalPrice = product.price;
+      }
+    }
+
     resolvedItems.push({
       product: product._id,
       barcode: product.barcode,
       name: product.name,
-      price: product.price,
+      price: linePrice,
+      ...(originalPrice !== undefined ? { originalPrice } : {}),
       unit: product.unit,
       quantity,
-      lineTotal: product.price * quantity,
+      lineTotal: linePrice * quantity,
     });
   }
 
@@ -168,7 +192,7 @@ async function updateItems(req, res) {
 }
 
 async function complete(req, res) {
-  const { paymentMethod, debtorId } = req.body || {};
+  const { paymentMethod, debtorId, breakdown } = req.body || {};
   if (!PAYMENT_METHODS.includes(paymentMethod)) {
     return res.status(400).json({ message: "To'lov turini tanlang" });
   }
@@ -202,6 +226,37 @@ async function complete(req, res) {
     }
   }
 
+  // Mixed payment: the cashier splits one sale's total across cash/card/
+  // online (e.g. part cash, part card). Each sub-amount must be a positive
+  // number, no method repeated, and the parts must add up to exactly the
+  // sale's total — a mismatch almost always means the cashier mistyped one
+  // of the amounts, so this is rejected rather than silently rounded.
+  let paymentBreakdown;
+  if (paymentMethod === 'mixed') {
+    if (!Array.isArray(breakdown) || breakdown.length === 0) {
+      return res.status(400).json({ message: "Aralash to'lov uchun kamida bitta usul kerak" });
+    }
+    const seen = new Set();
+    paymentBreakdown = [];
+    for (const { method, amount } of breakdown) {
+      if (!MIXED_SUB_METHODS.includes(method) || seen.has(method)) {
+        return res.status(400).json({ message: "To'lov usuli noto'g'ri yoki takrorlangan" });
+      }
+      const value = Number(amount);
+      if (!Number.isFinite(value) || value <= 0) {
+        return res.status(400).json({ message: "Har bir usul uchun summa kiritilishi kerak" });
+      }
+      seen.add(method);
+      paymentBreakdown.push({ method, amount: value });
+    }
+    const sum = paymentBreakdown.reduce((s, p) => s + p.amount, 0);
+    if (Math.round(sum) !== Math.round(sale.total)) {
+      return res.status(400).json({
+        message: `Summalar jamining savdo jamiga (${sale.total.toLocaleString()} so'm) teng bo'lishi kerak`,
+      });
+    }
+  }
+
   const products = [];
   for (const item of sale.items) {
     const product = await Product.findById(item.product);
@@ -228,6 +283,7 @@ async function complete(req, res) {
   sale.completedAt = new Date();
   sale.paymentMethod = paymentMethod;
   if (debtor) sale.debtor = debtor._id;
+  if (paymentBreakdown) sale.paymentBreakdown = paymentBreakdown;
   if (!(await saveWithConflictHandling(res, sale))) return;
   if (debtor) await Debtor.updateOne({ _id: debtor._id }, { $inc: { balance: sale.total } });
   emitToMarket(req.user.market, 'stock:changed', stockDiffs);

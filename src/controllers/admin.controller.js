@@ -11,6 +11,7 @@ const Debtor = require('../models/Debtor');
 const DebtPayment = require('../models/DebtPayment');
 const { paginationParams } = require('../utils/pagination');
 const { setMarketStatus, clearMarketStatus } = require('../services/marketCache');
+const { revenueTotals } = require('../utils/revenue');
 
 function addMonths(date, months) {
   const d = new Date(date);
@@ -75,15 +76,12 @@ async function detail(req, res) {
     return res.status(404).json({ message: 'Doʻkon topilmadi' });
   }
 
-  const [owner, workersCount, activeWorkersCount, productsCount, salesAgg] = await Promise.all([
+  const [owner, workersCount, activeWorkersCount, productsCount, totals] = await Promise.all([
     User.findOne({ market: market._id, role: 'owner' }).select('name username createdAt'),
     User.countDocuments({ market: market._id, role: 'cashier' }),
     User.countDocuments({ market: market._id, role: 'cashier', active: true }),
     Product.countDocuments({ market: market._id, active: true }),
-    Sale.aggregate([
-      { $match: { market: market._id, status: 'completed' } },
-      { $group: { _id: null, totalRevenue: { $sum: '$total' }, totalTransactions: { $sum: 1 } } },
-    ]),
+    revenueTotals(market._id),
   ]);
 
   res.json({
@@ -92,8 +90,8 @@ async function detail(req, res) {
     workersCount,
     activeWorkersCount,
     productsCount,
-    totalRevenue: salesAgg[0]?.totalRevenue || 0,
-    totalTransactions: salesAgg[0]?.totalTransactions || 0,
+    totalRevenue: totals.totalRevenue,
+    totalTransactions: totals.totalTransactions,
   });
 }
 

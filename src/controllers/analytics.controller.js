@@ -2,33 +2,26 @@ const mongoose = require('mongoose');
 const Sale = require('../models/Sale');
 const Product = require('../models/Product');
 const { paginationParams } = require('../utils/pagination');
+const { revenueTotals, revenueByDay } = require('../utils/revenue');
+
+function buildDateRange(req) {
+  const range = {};
+  if (req.query.from) range.$gte = new Date(req.query.from);
+  if (req.query.to) range.$lte = new Date(req.query.to);
+  return range.$gte || range.$lte ? range : undefined;
+}
 
 function buildMatch(req) {
   const match = { market: new mongoose.Types.ObjectId(req.user.market), status: 'completed' };
 
-  const range = {};
-  if (req.query.from) range.$gte = new Date(req.query.from);
-  if (req.query.to) range.$lte = new Date(req.query.to);
-  if (range.$gte || range.$lte) match.completedAt = range;
+  const range = buildDateRange(req);
+  if (range) match.completedAt = range;
 
   return match;
 }
 
 async function summary(req, res) {
-  const match = buildMatch(req);
-  const [result] = await Sale.aggregate([
-    { $match: match },
-    {
-      $group: {
-        _id: null,
-        totalRevenue: { $sum: '$total' },
-        totalTransactions: { $sum: 1 },
-      },
-    },
-  ]);
-
-  const totalRevenue = result?.totalRevenue || 0;
-  const totalTransactions = result?.totalTransactions || 0;
+  const { totalRevenue, totalTransactions } = await revenueTotals(req.user.market, buildDateRange(req));
   res.json({
     totalRevenue,
     totalTransactions,
@@ -61,21 +54,7 @@ async function topProducts(req, res) {
 }
 
 async function daily(req, res) {
-  const match = buildMatch(req);
-
-  const rows = await Sale.aggregate([
-    { $match: match },
-    {
-      $group: {
-        _id: { $dateToString: { format: '%Y-%m-%d', date: '$completedAt' } },
-        revenue: { $sum: '$total' },
-        transactions: { $sum: 1 },
-      },
-    },
-    { $sort: { _id: 1 } },
-  ]);
-
-  res.json({ days: rows.map((r) => ({ date: r._id, revenue: r.revenue, transactions: r.transactions })) });
+  res.json({ days: await revenueByDay(req.user.market, buildDateRange(req)) });
 }
 
 // Current stock valued two ways: at selling price (what the shelf is worth
