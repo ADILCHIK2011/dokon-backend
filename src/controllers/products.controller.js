@@ -33,7 +33,8 @@ async function list(req, res) {
 // is the same checkout capability, not a new one. costPrice is left out
 // since this is a much broader browse surface (partial name vs. an exact
 // code the cashier must already know) and margin data has no reason to ride
-// along with it.
+// along with it. No limit — the cashier should see every match, same as the
+// Ombor (products) search, not just a capped top-N.
 async function searchQuick(req, res) {
   const q = String(req.query.q || '').trim();
   const nameFilter = buildNameSearchFilter(q);
@@ -44,8 +45,7 @@ async function searchQuick(req, res) {
     ...nameFilter,
   })
     .select('name price barcode unit stock')
-    .sort({ name: 1 })
-    .limit(8);
+    .sort({ name: 1 });
   res.json({ products });
 }
 
