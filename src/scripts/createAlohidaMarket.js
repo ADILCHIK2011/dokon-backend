@@ -3,11 +3,11 @@
 // admin.controller.js's ALOHIDA_FILTER). There's no admin-UI path to create
 // one; this script is the only way. Always Pro, never expires in practice.
 require('dotenv').config();
-const bcrypt = require('bcryptjs');
 const mongoose = require('mongoose');
 const connectDB = require('../config/db');
 const Market = require('../models/Market');
 const User = require('../models/User');
+const { hashPassword } = require('../utils/password');
 
 const ALOHIDA_YEARS = 100;
 function addYears(date, years) {
@@ -44,7 +44,7 @@ async function run() {
     active: true,
   });
 
-  const passwordHash = await bcrypt.hash(ownerPassword, 10);
+  const passwordHash = await hashPassword(ownerPassword, market);
   await User.create({
     name: ownerName,
     username: ownerUsername,

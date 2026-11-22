@@ -1,6 +1,6 @@
 const TelegramBot = require('node-telegram-bot-api');
 const cron = require('node-cron');
-const bcrypt = require('bcryptjs');
+const { verifyPassword } = require('../utils/password');
 const User = require('../models/User');
 const Market = require('../models/Market');
 const Product = require('../models/Product');
@@ -157,7 +157,7 @@ async function handleLoginStep(msg) {
   }
 
   const user = await User.findOne({ market: market._id, username: session.username, active: true });
-  const passwordMatches = user && (await bcrypt.compare(text, user.passwordHash));
+  const passwordMatches = user && (await verifyPassword(text, user.passwordHash, market));
   if (!passwordMatches) {
     await bot.sendMessage(chatId, "❌ Login yoki parol noto'g'ri. Qaytadan urinish uchun /start yuboring.");
     return true;

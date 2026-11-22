@@ -1,7 +1,7 @@
-const bcrypt = require('bcryptjs');
 const User = require('../models/User');
 const Market = require('../models/Market');
 const { notifyOwners } = require('../services/telegram');
+const { hashPassword } = require('../utils/password');
 
 const STARTER_WORKER_LIMIT = 3;
 
@@ -33,7 +33,7 @@ async function create(req, res) {
     return res.status(409).json({ message: 'Bu login band' });
   }
 
-  const market = await Market.findById(req.user.market).select('plan');
+  const market = await Market.findById(req.user.market).select('plan alohida');
   if (market?.plan !== 'pro') {
     const workerCount = await User.countDocuments({ market: req.user.market, role: 'cashier' });
     if (workerCount >= STARTER_WORKER_LIMIT) {
@@ -43,7 +43,7 @@ async function create(req, res) {
     }
   }
 
-  const passwordHash = await bcrypt.hash(password, 10);
+  const passwordHash = await hashPassword(password, market);
   const worker = await User.create({
     name,
     username,
@@ -87,7 +87,8 @@ async function resetPassword(req, res) {
   if (!password) {
     return res.status(400).json({ message: 'Yangi parol kerak' });
   }
-  const passwordHash = await bcrypt.hash(password, 10);
+  const market = await Market.findById(req.user.market).select('alohida');
+  const passwordHash = await hashPassword(password, market);
   const worker = await User.findOneAndUpdate(
     { _id: req.params.id, role: 'cashier', market: req.user.market },
     { passwordHash },

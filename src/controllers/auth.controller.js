@@ -1,7 +1,7 @@
-const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const Market = require('../models/Market');
+const { hashPassword, verifyPassword } = require('../utils/password');
 
 function signToken(user) {
   return jwt.sign(
@@ -54,7 +54,7 @@ async function login(req, res) {
     return res.status(401).json({ message: 'Login yoki parol notoʻgʻri' });
   }
 
-  const match = await bcrypt.compare(password, user.passwordHash);
+  const match = await verifyPassword(password, user.passwordHash, market);
   if (!match) {
     return res.status(401).json({ message: 'Login yoki parol notoʻgʻri' });
   }
@@ -66,7 +66,9 @@ async function login(req, res) {
 // client-alohida login: password only, no market code or username. Each
 // alohida deployment serves a small, fixed set of users, so instead of
 // asking for a market/username we scan active users across alohida markets
-// and bcrypt.compare the password against each until one matches.
+// and compare the password against each until one matches. Alohida markets
+// store `passwordHash` in plaintext (see utils/password.js), so this is a
+// plain string comparison rather than bcrypt.compare.
 async function alohidaLogin(req, res) {
   const { password } = req.body;
   if (!password) {
@@ -83,8 +85,8 @@ async function alohidaLogin(req, res) {
 
   const users = await User.find({ market: { $in: validMarketIds }, active: true });
   for (const user of users) {
-    if (await bcrypt.compare(password, user.passwordHash)) {
-      const market = markets.find((m) => m._id.equals(user.market));
+    const market = markets.find((m) => m._id.equals(user.market));
+    if (await verifyPassword(password, user.passwordHash, market)) {
       const token = signToken(user);
       return res.json({ token, user: publicUser(user, market) });
     }
@@ -105,7 +107,7 @@ async function adminLogin(req, res) {
     return res.status(401).json({ message: 'Login yoki parol notoʻgʻri' });
   }
 
-  const match = await bcrypt.compare(password, user.passwordHash);
+  const match = await verifyPassword(password, user.passwordHash, null);
   if (!match) {
     return res.status(401).json({ message: 'Login yoki parol notoʻgʻri' });
   }
@@ -133,13 +135,14 @@ async function changePassword(req, res) {
   if (!user) {
     return res.status(404).json({ message: 'Foydalanuvchi topilmadi' });
   }
+  const market = user.market ? await Market.findById(user.market) : null;
 
-  const match = await bcrypt.compare(currentPassword, user.passwordHash);
+  const match = await verifyPassword(currentPassword, user.passwordHash, market);
   if (!match) {
     return res.status(401).json({ message: 'Joriy parol notoʻgʻri' });
   }
 
-  user.passwordHash = await bcrypt.hash(newPassword, 10);
+  user.passwordHash = await hashPassword(newPassword, market);
   await user.save();
   res.json({ message: 'Parol yangilandi' });
 }
