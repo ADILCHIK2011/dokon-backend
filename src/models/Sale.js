@@ -35,18 +35,20 @@ const saleSchema = new mongoose.Schema({
   status: { type: String, enum: ['open', 'completed', 'cancelled'], default: 'open' },
   paymentMethod: { type: String, enum: ['cash', 'card', 'online', 'nasiya', 'mixed'], default: 'cash' },
   // Set only when paymentMethod === 'mixed' — how `total` was split across
-  // cash/card/online (see complete() in sales.controller.js, which requires
-  // these amounts to sum to exactly `total`).
+  // cash/card/online/nasiya (see complete() in sales.controller.js, which
+  // requires these amounts to sum to exactly `total`). A 'nasiya' slice here
+  // credits `debtor` below for just that slice, not the whole sale.
   paymentBreakdown: {
     type: [{
-      method: { type: String, enum: ['cash', 'card', 'online'], required: true },
+      method: { type: String, enum: ['cash', 'card', 'online', 'nasiya'], required: true },
       amount: { type: Number, required: true },
       _id: false,
     }],
     default: undefined,
   },
-  // Set only when paymentMethod === 'nasiya' — who the sale's total was
-  // credited to (see sales.controller.js's complete()).
+  // Set when paymentMethod === 'nasiya' (credited the full total), or
+  // 'mixed' with a 'nasiya' slice in paymentBreakdown (credited just that
+  // slice) — see sales.controller.js's complete().
   debtor: { type: mongoose.Schema.Types.ObjectId, ref: 'Debtor' },
   createdAt: { type: Date, default: Date.now },
   completedAt: { type: Date },

@@ -52,8 +52,11 @@ async function getOne(req, res) {
     return res.status(404).json({ message: 'Nasiyachi topilmadi' });
   }
   const [purchases, payments] = await Promise.all([
+    // paymentMethod/paymentBreakdown are included so the client can tell a
+    // mixed sale's nasiya slice apart from `total` — the full sale amount,
+    // which for a mixed sale is NOT what was credited to this debtor.
     Sale.find({ market: req.user.market, debtor: debtor._id, status: 'completed' })
-      .select('items total completedAt')
+      .select('items total completedAt paymentMethod paymentBreakdown')
       .sort({ completedAt: -1 }),
     DebtPayment.find({ market: req.user.market, debtor: debtor._id })
       .sort({ createdAt: -1 })

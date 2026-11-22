@@ -10,7 +10,7 @@ const { notifyOwners } = require('../services/telegram');
 const { isFractionalUnit, unitLabel } = require('../utils/units');
 
 const PAYMENT_METHODS = ['cash', 'card', 'online', 'nasiya', 'mixed'];
-const MIXED_SUB_METHODS = ['cash', 'card', 'online'];
+const MIXED_SUB_METHODS = ['cash', 'card', 'online', 'nasiya'];
 
 async function saveWithConflictHandling(res, sale) {
   try {
@@ -208,9 +208,14 @@ async function complete(req, res) {
   // this endpoint's payment methods, which every cashier can always use), so
   // it's gated here rather than on the whole route — see requirePlan/
   // requirePermission in auth.middleware.js for the same checks applied as
-  // route-level middleware on debtors.routes.js.
+  // route-level middleware on debtors.routes.js. A 'mixed' sale with a
+  // 'nasiya' slice in its breakdown needs the exact same debtor/permission
+  // checks as a pure 'nasiya' sale.
+  const needsDebtor =
+    paymentMethod === 'nasiya' ||
+    (paymentMethod === 'mixed' && Array.isArray(breakdown) && breakdown.some((b) => b?.method === 'nasiya'));
   let debtor = null;
-  if (paymentMethod === 'nasiya') {
+  if (needsDebtor) {
     if (req.market.plan !== 'pro') {
       return res.status(403).json({ message: 'Bu funksiya faqat Pro rejada mavjud' });
     }
@@ -227,10 +232,11 @@ async function complete(req, res) {
   }
 
   // Mixed payment: the cashier splits one sale's total across cash/card/
-  // online (e.g. part cash, part card). Each sub-amount must be a positive
-  // number, no method repeated, and the parts must add up to exactly the
-  // sale's total — a mismatch almost always means the cashier mistyped one
-  // of the amounts, so this is rejected rather than silently rounded.
+  // online/nasiya (e.g. part cash, part credited to a debtor). Each
+  // sub-amount must be a positive number, no method repeated, and the parts
+  // must add up to exactly the sale's total — a mismatch almost always means
+  // the cashier mistyped one of the amounts, so this is rejected rather than
+  // silently rounded.
   let paymentBreakdown;
   if (paymentMethod === 'mixed') {
     if (!Array.isArray(breakdown) || breakdown.length === 0) {
@@ -285,7 +291,14 @@ async function complete(req, res) {
   if (debtor) sale.debtor = debtor._id;
   if (paymentBreakdown) sale.paymentBreakdown = paymentBreakdown;
   if (!(await saveWithConflictHandling(res, sale))) return;
-  if (debtor) await Debtor.updateOne({ _id: debtor._id }, { $inc: { balance: sale.total } });
+  if (debtor) {
+    // Plain 'nasiya' credits the whole sale; 'mixed' credits only its
+    // nasiya slice of the breakdown — see returnItems() for the matching
+    // proportional reduction on a later return.
+    const nasiyaAmount =
+      paymentMethod === 'nasiya' ? sale.total : paymentBreakdown.find((p) => p.method === 'nasiya').amount;
+    await Debtor.updateOne({ _id: debtor._id }, { $inc: { balance: nasiyaAmount } });
+  }
   emitToMarket(req.user.market, 'stock:changed', stockDiffs);
 
   const outOfStock = stockDiffs.filter((d) => d.stock === 0);
@@ -360,9 +373,21 @@ async function returnItems(req, res) {
   if (!(await saveWithConflictHandling(res, sale))) return;
 
   if (sale.debtor) {
+    // 'total + returnedTotal' is the sale's original amount and never
+    // changes across returns (each return moves the same delta from one to
+    // the other), so this ratio is stable call to call. A plain 'nasiya'
+    // sale has no breakdown and was credited in full, so its share is 1 —
+    // same as before this sale type could be partially on credit.
+    const originalTotal = sale.total + sale.returnedTotal;
+    const nasiyaAmount =
+      sale.paymentMethod === 'nasiya'
+        ? originalTotal
+        : sale.paymentBreakdown?.find((p) => p.method === 'nasiya')?.amount || 0;
+    const nasiyaShare = originalTotal > 0 ? nasiyaAmount / originalTotal : 0;
+    const debtorRefund = Math.round(totalRefund * nasiyaShare);
     const debtor = await Debtor.findById(sale.debtor);
     if (debtor) {
-      debtor.balance = Math.max(0, debtor.balance - totalRefund);
+      debtor.balance = Math.max(0, debtor.balance - debtorRefund);
       await debtor.save();
     }
   }
